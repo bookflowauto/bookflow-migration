@@ -1,0 +1,149 @@
+{
+  "name": "02b - Regenerate SOAP",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "node-001",
+      "name": "Regenerate SOAP Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "regenerate-soap",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-002",
+      "name": "Get Appointment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [420, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_appointment_full?appointment_id=eq.{{ $json.body.appointment_id }}&select=*",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-003",
+      "name": "Get All Transcripts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_patient_transcripts?patient_id=eq.{{ $json.patient_id }}&select=appointment_time,raw_transcript",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-004",
+      "name": "Build SOAP Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const transcripts = $input.all().map(i => i.json);\nconst patientName = $('Get Appointment').item.json.patient_name;\n\nconst transcriptBlock = transcripts\n  .map((t, i) => `Συνεδρία ${i + 1} (${new Date(t.appointment_time).toLocaleDateString('el-GR')}):\\n${t.raw_transcript}`)\n  .join('\\n\\n---\\n\\n');\n\nconst systemPrompt = `Είσαι κλινικός ψυχολόγος γραμματέας. Δημιούργησε ένα πολύ συνοπτικό συγκεντρωτικό SOAP σημείωμα στα Ελληνικά βασισμένο ΜΟΝΟ στα παρεχόμενα απομαγνητοφωνημένα κείμενα συνεδριών. \n\nΜορφή:\nS (Υποκειμενικό): Τι ανέφερε ο ασθενής\nO (Αντικειμενικό): Παρατηρήσεις συμπεριφοράς/επικοινωνίας\nA (Αξιολόγηση): Κλινική εκτίμηση προόδου\nP (Σχέδιο): Επόμενα θεραπευτικά βήματα\n\nΝα είσαι συνοπτικός. Μη χρησιμοποιείς πληροφορίες εκτός των απομαγνητοφωνήσεων.`;\n\nconst userPrompt = `Ασθενής: ${patientName}\\n\\nΑπομαγνητοφωνήσεις Συνεδριών:\\n\\n${transcriptBlock}`;\n\nreturn [{ json: { systemPrompt, userPrompt, patientId: $('Get Appointment').item.json.patient_id } }];"
+      }
+    },
+    {
+      "id": "node-005",
+      "name": "GPT-4o SOAP Merger",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userPrompt } ], max_tokens: 1000, temperature: 0.3 }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "", "name": "OpenAI API" }
+      }
+    },
+    {
+      "id": "node-006",
+      "name": "Store SOAP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 300],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?id=eq.{{ $('Build SOAP Prompt').item.json.patientId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ merged_clinical_summary: $json.choices[0].message.content }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-007",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1520, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }",
+        "options": { "responseCode": 200 }
+      }
+    }
+  ],
+  "connections": {
+    "Regenerate SOAP Webhook": {
+      "main": [[{ "node": "Get Appointment", "type": "main", "index": 0 }]]
+    },
+    "Get Appointment": {
+      "main": [[{ "node": "Get All Transcripts", "type": "main", "index": 0 }]]
+    },
+    "Get All Transcripts": {
+      "main": [[{ "node": "Build SOAP Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build SOAP Prompt": {
+      "main": [[{ "node": "GPT-4o SOAP Merger", "type": "main", "index": 0 }]]
+    },
+    "GPT-4o SOAP Merger": {
+      "main": [[{ "node": "Store SOAP", "type": "main", "index": 0 }]]
+    },
+    "Store SOAP": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  }
+}

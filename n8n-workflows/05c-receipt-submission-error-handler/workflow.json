@@ -1,0 +1,127 @@
+{
+  "name": "05c - Receipt Submission Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Find the original appointmentId from anywhere in the failed workflow's run data.\n// We scan all node outputs for a body.appointmentId or top-level appointmentId,\n// so this works regardless of how the webhook node is named in Workflow #5.\n\nconst input = $input.first().json;\nconst runData = input.execution?.data?.resultData?.runData ?? {};\n\nlet appointmentId = null;\nlet practitionerId = null;\n\nfunction findIds(obj, depth = 0) {\n  if (!obj || typeof obj !== 'object' || depth > 8) return;\n  if (obj.appointmentId && !appointmentId) appointmentId = obj.appointmentId;\n  if (obj.practitionerId && !practitionerId) practitionerId = obj.practitionerId;\n  for (const key of Object.keys(obj)) {\n    findIds(obj[key], depth + 1);\n  }\n}\n\nfindIds(runData);\n\nconst errorMessage = input.execution?.error?.message ?? 'Unknown error';\nconst lastNode = input.execution?.lastNodeExecuted ?? 'unknown';\n\nreturn [{\n  json: {\n    appointmentId,\n    practitionerId,\n    errorMessage,\n    lastNode,\n    canPatch: appointmentId !== null,\n    // Debug: include node names found so we can see what's available\n    nodesInRunData: Object.keys(runData),\n  },\n}];"
+      },
+      "id": "extract-context",
+      "name": "Extract Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "can-patch-check",
+              "leftValue": "={{ $json.canPatch }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "can-patch-if",
+      "name": "Can PATCH?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $json.appointmentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"mydata_status\": \"failed\"\n}",
+        "options": {}
+      },
+      "id": "patch-appointment-failed",
+      "name": "PATCH Appointment to Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [870, 220],
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Supabase Service Role"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Context": {
+      "main": [
+        [
+          {
+            "node": "Can PATCH?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can PATCH?": {
+      "main": [
+        [
+          {
+            "node": "PATCH Appointment to Failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "f57e0d73-cb2c-4d4a-a005-1a2c4e8f6a9d",
+  "meta": {
+    "description": "Catches errors from Workflow #5 (Receipt Submission to myDATA). Extracts appointmentId from the failed workflow's webhook input, then PATCHes the appointment to mydata_status='failed' so the dashboard shows the retry button immediately."
+  }
+}

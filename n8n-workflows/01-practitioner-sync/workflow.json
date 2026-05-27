@@ -1,0 +1,453 @@
+{
+  "name": "01 - Practitioner Sync",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "node-001",
+      "name": "Hourly Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "hours", "hoursInterval": 1 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-002",
+      "name": "Get Active Practitioners",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [420, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/practitioners?status=eq.active&select=id,name,calendar_id,phone,sms_reminder_enabled,reminder_offset_hours",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {
+          "response": {
+            "response": { "responseFormat": "json" }
+          }
+        }
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-002b",
+      "name": "Split Practitioners",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [580, 300],
+      "parameters": {
+        "jsCode": "// HTTP node already split the array into items — just pass through\nreturn $input.all();"
+      }
+    },
+    {
+      "id": "node-003",
+      "name": "Get Events ~24h Ahead",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [780, 300],
+      "parameters": {
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "={{ $json.calendar_id }}",
+          "mode": "id"
+        },
+        "returnAll": true,
+        "options": {
+          "timeMin": "={{ $now.toISO() }}",
+          "timeMax": "={{ $now.plus({hours: $json.reminder_offset_hours || 24}).toISO() }}",
+          "singleEvents": true
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": { "id": "", "name": "Google Calendar account" }
+      }
+    },
+    {
+      "id": "node-004",
+      "name": "Parse Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const event = $input.item.json;\n\n// Title = patient name (strip common prefixes/parens)\nconst rawTitle = (event.summary || '').trim();\nconst patientName = rawTitle\n  .replace(/^(session|test session|συνεδρία|appointment|ραντεβού)\\s*[-:]\\s*/i, '')\n  .replace(/\\s*\\([^)]*\\)\\s*$/, '')\n  .trim() || rawTitle || 'Unknown Patient';\n\n// Description contains the phone number in any format.\n// Normalise to Infobip format: country code + number, no +, spaces or dashes.\nconst desc = event.description || '';\nconst rawPhone = (desc.match(/\\+?[\\d\\s\\-()]{8,}/) || [''])[0];\nlet phone = rawPhone.replace(/\\D/g, ''); // strip everything non-digit\n\n// If it's a 10-digit Greek mobile (starts with 6), prepend country code 30\nif (phone.length === 10 && phone.startsWith('6')) {\n  phone = '30' + phone;\n}\n\n// If after cleaning it's still too short, treat as missing\nif (phone.length < 10) phone = null;\n\nreturn {\n  json: {\n    google_event_id: event.id,\n    summary: rawTitle,\n    appointment_time: event.start?.dateTime || event.start?.date,\n    patient_name: patientName,\n    patient_phone: phone,\n    raw_description: desc\n  }\n};"
+      }
+    },
+    {
+      "id": "node-006",
+      "name": "Get Patient by Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1180, 300],
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?phone=eq.{{ encodeURIComponent($json.patient_phone) }}&select=id%2Cname%2Cpatient_ref%2Cphone&limit=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-007",
+      "name": "Patient Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1400, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-002",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-008",
+      "name": "Create Patient",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1620, 420],
+      "continueOnFail": true,
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $('Parse Event').item.json.patient_name, phone: $('Parse Event').item.json.patient_phone, intake_status: 'pending' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-008b",
+      "name": "Resolve Patient ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 350],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Merge both paths: either patient was found (Get Patient by Phone) or created (Create Patient)\n// Extract the patient ID from whichever succeeded.\n// Safe handling: Create Patient may not have executed if patient was found.\n\ntry {\n  const foundPatient = $('Get Patient by Phone').item.json;\n  if (foundPatient?.id) {\n    return { json: { patient_id: foundPatient.id } };\n  }\n} catch (e) {\n  // Get Patient by Phone not available\n}\n\ntry {\n  const createdPatient = $('Create Patient').item.json;\n  if (createdPatient?.id) {\n    return { json: { patient_id: createdPatient.id } };\n  }\n} catch (e) {\n  // Create Patient not executed (patient was found instead)\n}\n\n// If both failed, log warning but allow flow to continue\nconsole.warn('[Practitioner Sync] Could not resolve patient ID for event:', $('Parse Event').item.json.google_event_id);\nreturn { json: { patient_id: null, warning: 'No patient found or created' } };"
+      }
+    },
+    {
+      "id": "node-009",
+      "name": "Upsert Appointment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1960, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?on_conflict=google_event_id",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "resolution=merge-duplicates,return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ google_event_id: $('Parse Event').item.json.google_event_id, practitioner_id: $('Split Practitioners').item.json.id, patient_id: $json.patient_id, appointment_time: $('Parse Event').item.json.appointment_time, summary: $('Parse Event').item.json.summary, status: 'scheduled' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-010",
+      "name": "Check SMS Already Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2060, 300],
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $json.id }}&select=id,sms_log(id,status)",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-011",
+      "name": "Should Send SMS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2280, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-003",
+              "leftValue": "={{ ($json.sms_log || []).filter(l => l.status === 'sent').length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "equals" }
+            },
+            {
+              "id": "cond-004",
+              "leftValue": "={{ $('Parse Event').item.json.patient_phone }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            },
+            {
+              "id": "cond-005",
+              "leftValue": "={{ $('Split Practitioners').item.json.sms_reminder_enabled !== false }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-011a",
+      "name": "Get Practitioner Tier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2400, 200],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/practitioners?id=eq.{{ $('Split Practitioners').item.json.id }}&select=plan_tier&limit=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-011b",
+      "name": "Get Monthly SMS Usage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2400, 320],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_practitioner_usage_monthly?practitioner_id=eq.{{ $('Split Practitioners').item.json.id }}&period_start=gte.{{ new Date().toISOString().split('T')[0].slice(0, 7) + '-01' }}&select=sms_sent_count",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "alwaysOutputData": true,
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-011c",
+      "name": "Check SMS Quota",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 440],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// SMS quota limits per plan tier\nconst quotas = {\n  essentials: 100,\n  professional: 500,\n  premium: 1500\n};\n\nconst planTier = $('Get Practitioner Tier').item.json.plan_tier || 'essentials';\nconst limit = quotas[planTier] || 100;\nconst currentUsage = ($('Get Monthly SMS Usage').item.json[0]?.sms_sent_count) || 0;\nconst wouldExceed = (currentUsage + 1) > limit;\n\nreturn {\n  json: {\n    plan_tier: planTier,\n    limit,\n    current_usage: currentUsage,\n    quota_exceeded: wouldExceed\n  }\n};"
+      }
+    },
+    {
+      "id": "node-011d",
+      "name": "Is SMS Quota OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2600, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.quota_exceeded }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEqual" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "node-011e",
+      "name": "Log SMS Quota Exceeded",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2800, 440],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/sms_log",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ appointment_id: $('Upsert Appointment').item.json.id, patient_id: $('Upsert Appointment').item.json.patient_id, phone: $('Parse Event').item.json.patient_phone, message_body: 'SMS reminder skipped (quota exceeded for ' + $json.plan_tier + ': ' + $json.current_usage + '/' + $json.limit + ')', status: 'quota_exceeded', sent_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-012",
+      "name": "Send SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2800, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://d88mkr.api.infobip.com/sms/2/text/advanced",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messages: [{ from: 'BookFlow', destinations: [{ to: $('Parse Event').item.json.patient_phone }], text: 'Αγαπητέ/ή ' + $('Parse Event').item.json.patient_name + ', σας υπενθυμίζουμε το επερχόμενο ραντεβού σας με τον ' + $('Split Practitioners').item.json.name + ' στις ' + new Date($('Parse Event').item.json.appointment_time).toLocaleString('el-GR', {dateStyle:'short',timeStyle:'short'}) + '. Επιβεβαίωση: https://app.bookflow.uk/confirm/' + $('Upsert Appointment').item.json.id }] }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "", "name": "Infobip API" }
+      }
+    },
+    {
+      "id": "node-013",
+      "name": "Log SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2720, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/sms_log",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ appointment_id: $('Upsert Appointment').item.json.id, patient_id: $('Upsert Appointment').item.json.patient_id, phone: $('Parse Event').item.json.patient_phone, message_body: 'Reminder SMS (within 24h window)', infobip_msg_id: $json.messages?.[0]?.messageId || '', status: 'sent', sent_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    }
+  ],
+  "connections": {
+    "Hourly Trigger": {
+      "main": [[{ "node": "Get Active Practitioners", "type": "main", "index": 0 }]]
+    },
+    "Get Active Practitioners": {
+      "main": [[{ "node": "Split Practitioners", "type": "main", "index": 0 }]]
+    },
+    "Split Practitioners": {
+      "main": [[{ "node": "Get Events ~24h Ahead", "type": "main", "index": 0 }]]
+    },
+    "Get Events ~24h Ahead": {
+      "main": [[{ "node": "Parse Event", "type": "main", "index": 0 }]]
+    },
+    "Parse Event": {
+      "main": [[{ "node": "Get Patient by Phone", "type": "main", "index": 0 }]]
+    },
+    "Get Patient by Phone": {
+      "main": [[{ "node": "Patient Found?", "type": "main", "index": 0 }]]
+    },
+    "Patient Found?": {
+      "main": [
+        [{ "node": "Resolve Patient ID", "type": "main", "index": 0 }],
+        [{ "node": "Create Patient", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Patient": {
+      "main": [[{ "node": "Resolve Patient ID", "type": "main", "index": 0 }]]
+    },
+    "Resolve Patient ID": {
+      "main": [[{ "node": "Upsert Appointment", "type": "main", "index": 0 }]]
+    },
+    "Upsert Appointment": {
+      "main": [[{ "node": "Check SMS Already Sent", "type": "main", "index": 0 }]]
+    },
+    "Check SMS Already Sent": {
+      "main": [[{ "node": "Should Send SMS?", "type": "main", "index": 0 }]]
+    },
+    "Should Send SMS?": {
+      "main": [
+        [{ "node": "Get Practitioner Tier", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Get Practitioner Tier": {
+      "main": [[{ "node": "Get Monthly SMS Usage", "type": "main", "index": 0 }]]
+    },
+    "Get Monthly SMS Usage": {
+      "main": [[{ "node": "Check SMS Quota", "type": "main", "index": 0 }]]
+    },
+    "Check SMS Quota": {
+      "main": [[{ "node": "Is SMS Quota OK?", "type": "main", "index": 0 }]]
+    },
+    "Is SMS Quota OK?": {
+      "main": [
+        [{ "node": "Send SMS", "type": "main", "index": 0 }],
+        [{ "node": "Log SMS Quota Exceeded", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send SMS": {
+      "main": [[{ "node": "Log SMS", "type": "main", "index": 0 }]]
+    },
+    "Log SMS Quota Exceeded": {
+      "main": []
+    }
+  }
+}

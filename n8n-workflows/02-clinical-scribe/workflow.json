@@ -1,0 +1,543 @@
+{
+  "name": "02 - Clinical Scribe",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "nodes": [
+    {
+      "id": "node-001",
+      "name": "Session Recording Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "session-recording",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "node-002",
+      "name": "Parse Webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = $input.item.json.body || $input.item.json;\nconst questions = body?.submission?.questions || [];\n\nconst q = (key) => (questions.find(f =>\n  f.name?.toLowerCase().includes(key)) || {}).value ?? null;\n\nconst appointmentId = q('appointment id') || q('appointment_id') || \n  $input.item.json.query?.appointment_id || null;\n\n// Audio file — Fillout wraps file uploads as {url, name, ...} or [{url,...}]\nconst audioField = questions.find(f =>\n  f.type === 'FileUpload' || f.name?.toLowerCase().includes('audio') || f.name?.toLowerCase().includes('session'));\nlet audioVal = audioField?.value;\nif (Array.isArray(audioVal)) audioVal = audioVal[0];\nconst audioUrl = audioVal?.url || (typeof audioVal === 'string' ? audioVal : null);\n\nreturn { json: { appointmentId, audioUrl } };"
+      }
+    },
+    {
+      "id": "node-003",
+      "name": "Get Appointment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_appointment_full?appointment_id=eq.{{ $json.appointmentId }}&select=*",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-003b",
+      "name": "Get Practitioner Tier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [780, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/practitioners?id=eq.{{ $json.practitioner_id }}&select=plan_tier&limit=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-003c",
+      "name": "Get Monthly Scribe Usage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [780, 420],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_practitioner_usage_monthly?practitioner_id=eq.{{ $json.practitioner_id }}&period_start=gte.{{ new Date().toISOString().split('T')[0].slice(0, 7) + '-01' }}&select=scribe_minutes_used",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "alwaysOutputData": true,
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-003d",
+      "name": "Check Scribe Quota",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [780, 540],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Scribe quota limits per plan tier (in minutes)\nconst quotas = {\n  essentials: 30,\n  professional: 600,\n  premium: 1800\n};\n\nconst planTier = $('Get Practitioner Tier').item.json.plan_tier || 'essentials';\nconst limit = quotas[planTier] || 30;\nconst currentUsage = ($('Get Monthly Scribe Usage').item.json[0]?.scribe_minutes_used) || 0;\nconst wouldExceed = currentUsage >= limit;\n\nreturn {\n  json: {\n    plan_tier: planTier,\n    limit,\n    current_usage: currentUsage,\n    quota_exceeded: wouldExceed\n  }\n};"
+      }
+    },
+    {
+      "id": "node-003e",
+      "name": "Is Scribe Quota OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 420],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.quota_exceeded }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEqual" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "node-003f",
+      "name": "Set Scribe Quota Exceeded",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1020, 560],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $('Get Appointment').item.json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scribe_status: 'quota_exceeded', audio_file_url: $('Parse Webhook').item.json.audioUrl }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-003g",
+      "name": "Respond Quota Exceeded",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 560],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: 'Scribe quota exceeded for ' + $('Check Scribe Quota').item.json.plan_tier + ': ' + Math.round($('Check Scribe Quota').item.json.current_usage * 10) / 10 + '/' + $('Check Scribe Quota').item.json.limit + ' minutes used this month' }) }}",
+        "options": { "responseCode": 429 }
+      }
+    },
+    {
+      "id": "node-004",
+      "name": "Set Transcribing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1020, 300],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $json.appointment_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"scribe_status\": \"transcribing\", \"audio_file_url\": \"{{ $('Parse Webhook').item.json.audioUrl }}\" }",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-005",
+      "name": "Download Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Parse Webhook').item.json.audioUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "node-006",
+      "name": "Transcribe Whisper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "whisper-1" },
+            { "name": "language", "value": "el" },
+            { "name": "file", "value": "={{ $binary.data }}", "parameterType": "formBinaryData" }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "", "name": "OpenAI API" }
+      }
+    },
+    {
+      "id": "node-006b",
+      "name": "Check Dictation Duration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const duration = $json.duration || 0;\nconst durationMinutes = duration / 60;\nconst maxSeconds = 8 * 60; // 8 minutes hard cap\nconst warnSeconds = 5 * 60; // 5 minute soft warning\n\nconst exceedsMax = duration > maxSeconds;\nconst exceedsWarn = duration > warnSeconds;\n\nif (exceedsMax) {\n  throw new Error(`Audio too long: ${Math.round(durationMinutes * 10) / 10} minutes (max 8 minutes). Please re-record a shorter dictation.`);\n}\n\nif (exceedsWarn) {\n  console.warn(`[Scribe] Long dictation: ${Math.round(durationMinutes * 10) / 10} minutes (warning threshold: 5 minutes)`);\n}\n\nreturn { json: { ...($json), durationMinutes, exceedsWarn } };"
+      }
+    },
+    {
+      "id": "node-007",
+      "name": "Store Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1520, 300],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $('Parse Webhook').item.json.appointmentId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ raw_transcript: $json.text, audio_duration_seconds: Math.round($json.duration || 0) }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-008",
+      "name": "Get All Transcripts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1740, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/v_patient_transcripts?patient_id=eq.{{ $('Get Appointment').item.json.patient_id }}&select=appointment_time,raw_transcript&order=appointment_time.desc&limit=15",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-009",
+      "name": "Build SOAP Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const transcripts = $input.all().map(i => i.json);\nconst patientName = $('Get Appointment').item.json.patient_name;\n\nconst transcriptBlock = transcripts\n  .map((t, i) => `Συνεδρία ${i + 1} (${new Date(t.appointment_time).toLocaleDateString('el-GR')}):\\n${t.raw_transcript}`)\n  .join('\\n\\n---\\n\\n');\n\nconst systemPrompt = `Είσαι κλινικός ψυχολόγος γραμματέας. Δημιούργησε ένα πολύ συνοπτικό συγκεντρωτικό SOAP σημείωμα στα Ελληνικά βασισμένο ΜΟΝΟ στα παρεχόμενα απομαγνητοφωνημένα κείμενα συνεδριών. \n\nΜορφή:\nS (Υποκειμενικό): Τι ανέφερε ο ασθενής\nO (Αντικειμενικό): Παρατηρήσεις συμπεριφοράς/επικοινωνίας\nA (Αξιολόγηση): Κλινική εκτίμηση προόδου\nP (Σχέδιο): Επόμενα θεραπευτικά βήματα\n\nΝα είσαι συνοπτικός. Μη χρησιμοποιείς πληροφορίες εκτός των απομαγνητοφωνήσεων.`;\n\nconst userPrompt = `Ασθενής: ${patientName}\\n\\nΑπομαγνητοφωνήσεις Συνεδριών:\\n\\n${transcriptBlock}`;\n\nreturn [{ json: { systemPrompt, userPrompt } }];"
+      }
+    },
+    {
+      "id": "node-010",
+      "name": "GPT-4o SOAP Merger",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2180, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userPrompt } ], max_tokens: 1000, temperature: 0.3 }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "", "name": "OpenAI API" }
+      }
+    },
+    {
+      "id": "node-011",
+      "name": "Store SOAP + Complete",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2400, 300],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?id=eq.{{ $('Get Appointment').item.json.patient_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ merged_clinical_summary: $json.choices[0].message.content }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-012",
+      "name": "Set Scribe Complete",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2620, 300],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $('Parse Webhook').item.json.appointmentId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"scribe_status\": \"complete\" }",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-013",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2840, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }",
+        "options": { "responseCode": 200 }
+      }
+    },
+    {
+      "id": "node-014",
+      "name": "Build Error Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 540],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const err = $input.item.json.error || $input.item.json;\nconst msg = err?.message || err?.description || JSON.stringify(err).slice(0, 500);\nreturn {\n  json: {\n    appointmentId: $('Parse Webhook').item.json.appointmentId,\n    failedNode: $execution?.lastNodeExecuted || 'unknown',\n    errorMessage: msg,\n    executionId: $execution?.id || null\n  }\n};"
+      }
+    },
+    {
+      "id": "node-015",
+      "name": "Mark Failed (Inline)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1520, 540],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $json.appointmentId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scribe_status: 'failed' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "node-016",
+      "name": "Log Inline Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1740, 540],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/scribe_errors",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ appointment_id: $('Build Error Context').item.json.appointmentId, execution_id: $('Build Error Context').item.json.executionId, failed_node: $('Build Error Context').item.json.failedNode, error_message: $('Build Error Context').item.json.errorMessage }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "node-017",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1960, 540],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: $('Build Error Context').item.json.errorMessage, failedNode: $('Build Error Context').item.json.failedNode }) }}",
+        "options": { "responseCode": 500 }
+      }
+    }
+  ],
+  "connections": {
+    "Session Recording Webhook": {
+      "main": [[{ "node": "Parse Webhook", "type": "main", "index": 0 }]]
+    },
+    "Parse Webhook": {
+      "main": [[{ "node": "Get Appointment", "type": "main", "index": 0 }]]
+    },
+    "Get Appointment": {
+      "main": [[{ "node": "Get Practitioner Tier", "type": "main", "index": 0 }]]
+    },
+    "Get Practitioner Tier": {
+      "main": [[{ "node": "Get Monthly Scribe Usage", "type": "main", "index": 0 }]]
+    },
+    "Get Monthly Scribe Usage": {
+      "main": [[{ "node": "Check Scribe Quota", "type": "main", "index": 0 }]]
+    },
+    "Check Scribe Quota": {
+      "main": [[{ "node": "Is Scribe Quota OK?", "type": "main", "index": 0 }]]
+    },
+    "Is Scribe Quota OK?": {
+      "main": [
+        [{ "node": "Set Transcribing", "type": "main", "index": 0 }],
+        [{ "node": "Set Scribe Quota Exceeded", "type": "main", "index": 0 }]
+      ]
+    },
+    "Set Scribe Quota Exceeded": {
+      "main": [[{ "node": "Respond Quota Exceeded", "type": "main", "index": 0 }]]
+    },
+    "Respond Quota Exceeded": {
+      "main": []
+    },
+    "Set Transcribing": {
+      "main": [[{ "node": "Download Audio", "type": "main", "index": 0 }]]
+    },
+    "Download Audio": {
+      "main": [
+        [{ "node": "Transcribe Whisper", "type": "main", "index": 0 }],
+        [{ "node": "Build Error Context", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transcribe Whisper": {
+      "main": [
+        [{ "node": "Check Dictation Duration", "type": "main", "index": 0 }],
+        [{ "node": "Build Error Context", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Dictation Duration": {
+      "main": [[{ "node": "Store Transcript", "type": "main", "index": 0 }]]
+    },
+    "Store Transcript": {
+      "main": [[{ "node": "Get All Transcripts", "type": "main", "index": 0 }]]
+    },
+    "Get All Transcripts": {
+      "main": [[{ "node": "Build SOAP Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build SOAP Prompt": {
+      "main": [[{ "node": "GPT-4o SOAP Merger", "type": "main", "index": 0 }]]
+    },
+    "GPT-4o SOAP Merger": {
+      "main": [
+        [{ "node": "Store SOAP + Complete", "type": "main", "index": 0 }],
+        [{ "node": "Build Error Context", "type": "main", "index": 0 }]
+      ]
+    },
+    "Store SOAP + Complete": {
+      "main": [[{ "node": "Set Scribe Complete", "type": "main", "index": 0 }]]
+    },
+    "Set Scribe Complete": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    },
+    "Build Error Context": {
+      "main": [[{ "node": "Mark Failed (Inline)", "type": "main", "index": 0 }]]
+    },
+    "Mark Failed (Inline)": {
+      "main": [[{ "node": "Log Inline Error", "type": "main", "index": 0 }]]
+    },
+    "Log Inline Error": {
+      "main": [[{ "node": "Respond Error", "type": "main", "index": 0 }]]
+    }
+  }
+}

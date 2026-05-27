@@ -1,0 +1,412 @@
+{
+  "name": "05 - Lead Scraper (Psychologists)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-01-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAllRows",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "node-02-sheets",
+      "name": "Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [220, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-website",
+              "leftValue": "={{ $json.website }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-03-haswebsite",
+      "name": "Has Website?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {},
+      "id": "node-04-ignore-nosite",
+      "name": "Ignore (no website)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [660, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://scrapeninja.p.rapidapi.com/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-RapidAPI-Key",
+              "value": "f5a46f8eddmshd3b3993e8b05fd2p1cf201jsn2e03496f8503"
+            },
+            {
+              "name": "X-RapidAPI-Host",
+              "value": "scrapeninja.p.rapidapi.com"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.website }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 4000
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-06-scrape",
+      "name": "Scrape Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 180],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Carry forward the original sheet row + add cleaned page text (per item)\nconst out = [];\nfor (let i = 0; i < $input.all().length; i++) {\n  const source = $('Has Website?').itemMatching(i).json;\n  const raw = $input.all()[i].json;\n  const html = raw.body || raw.html || raw.content || '';\n  const text = html\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/\\s+/g, ' ')\n    .trim()\n    .substring(0, 8000);\n  out.push({ json: { ...source, pageText: text } });\n}\nreturn out;"
+      },
+      "id": "node-07-striphtml",
+      "name": "Strip HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"gpt-4o\", \"max_tokens\": 10, \"temperature\": 0, \"messages\": [ { \"role\": \"system\", \"content\": \"# Role\\nLead Data Specialist\\n\\n# Task\\nIdentify if the following text contains a real business entity or practitioner. Output ONLY \\\"TRUE\\\" or \\\"FALSE\\\".\\n\\n# The \\\"Gold Standard\\\" (TRUE) - PRIORITY 1\\nIf you find ANY of the following, you MUST output TRUE. This overrides any \\\"junk\\\" or \\\"cookie\\\" text found elsewhere:\\n1. Professional Names: (e.g., Ραφτοπούλου Λία, Παναγιώτης Σκαφιδάς, Βερονίκη Σώλου).\\n2. Specific Titles: (e.g., Ψυχοθεραπευτής, Ψυχολόγος, Συμβουλευτική, Λακανική Ψυχανάλυση, Γιατρός).\\n3. Contact Details: Any Greek phone starting with 2, 69, or +30, or a specific Greek street address (e.g., Ηπείρου 11, Δέσπως Σέχου).\\n\\n# The \\\"Junk Standard\\\" (FALSE) - PRIORITY 2\\nONLY output FALSE if the text is EXCLUSIVELY one of these and contains NO specific practitioner name:\\n1. A raw server error (403 Forbidden / 404 Not Found).\\n2. A site-wide menu with generic categories (e.g., \\\"Home\\\", \\\"Contact\\\", \\\"Doctors\\\") but NO specific individual listed.\\n3. A login/signup wall that does not mention a specific professional's profile.\\n\\n# Strategic Instruction\\nIgnore all sections about \\\"Cookies,\\\" \\\"GDPR,\\\" or \\\"Privacy.\\\" The text may be from a directory (like Doctoranytime). Even if there is \\\"Login\\\" or \\\"Register\\\" text, if a specific doctor's name and bio/reviews appear in the noise, the answer is TRUE.\" }, { \"role\": \"user\", \"content\": $json.pageText } ] } }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          }
+        }
+      },
+      "id": "node-08-validate",
+      "name": "Validate Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 180],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Extract TRUE/FALSE from OpenAI response per item; carry forward source data\nconst out = [];\nfor (let i = 0; i < $input.all().length; i++) {\n  const ai = $input.all()[i].json;\n  const content = ai.choices?.[0]?.message?.content\n    || ai.message?.content\n    || ai.text\n    || ai.content\n    || '';\n  const isValid = content.trim().toUpperCase().includes('TRUE');\n  const source = $('Strip HTML').itemMatching(i).json;\n  out.push({ json: { ...source, isValid } });\n}\nreturn out;"
+      },
+      "id": "node-09-parsevalidate",
+      "name": "Parse Validate Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 180]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-valid",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-10-isvalid",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1760, 180]
+    },
+    {
+      "parameters": {},
+      "id": "node-11-ignore-invalid",
+      "name": "Ignore (invalid site)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1980, 340]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"gpt-4o\", \"max_tokens\": 100, \"temperature\": 0, \"messages\": [ { \"role\": \"system\", \"content\": \"Your job is to take the information from a website's web scraped data and find the prospect's email address.\\n\\nOutput in JSON only, No other text, not even backticks.\\n\\n{\\\"emailAddress\\\": \\\"\\\"}\" }, { \"role\": \"user\", \"content\": $json.pageText } ] } }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          }
+        }
+      },
+      "id": "node-12-extractemail",
+      "name": "Extract Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 180],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse JSON email response per item; carry forward source data\nconst out = [];\nfor (let i = 0; i < $input.all().length; i++) {\n  const ai = $input.all()[i].json;\n  const raw = ai.choices?.[0]?.message?.content\n    || ai.message?.content\n    || ai.text\n    || ai.content\n    || '{}';\n  let emailAddress = '';\n  try {\n    const parsed = JSON.parse(raw.trim());\n    emailAddress = parsed.emailAddress || '';\n  } catch(e) {\n    const m = raw.match(/\"emailAddress\"\\s*:\\s*\"([^\"]*)\"/i);\n    emailAddress = m ? m[1] : '';\n  }\n  const source = $('Parse Validate Result').itemMatching(i).json;\n  out.push({ json: { ...source, emailAddress } });\n}\nreturn out;"
+      },
+      "id": "node-13-parseemail",
+      "name": "Parse Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 180]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-email",
+              "leftValue": "={{ $json.emailAddress }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-14-hasemail",
+      "name": "Has Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2420, 180]
+    },
+    {
+      "parameters": {},
+      "id": "node-15-ignore-noemail",
+      "name": "Ignore (no email)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2640, 340]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const out = [];\nfor (let i = 0; i < $input.all().length; i++) {\n  const item = $input.all()[i].json;\n  const email = item.emailAddress || '';\n  \n  // Basic email regex validation\n  const emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n  \n  if (emailRegex.test(email)) {\n    out.push({ json: item });\n  }\n  // else: silently drop invalid emails\n}\nreturn out;"
+      },
+      "id": "node-17-validateemail",
+      "name": "Validate Email Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.instantly.ai/api/v2/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ZDRiZmQ2MDgtYTNlZi00NGNhLTg5ZGYtNTEwZDkyNTFlYzI4OnhTa3NGRXFaRk1oUg"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"campaign\": \"b20c5e83-da96-43a2-9375-3a8700966a51\", \"email\": $json.emailAddress, \"website\": $json.website, \"company_name\": $json.title, \"phone\": $json.phoneNumber, \"skip_if_in_workspace\": true, \"skip_if_in_campaign\": true, \"skip_if_in_list\": true, \"blocklist_id\": \"019b708e-b011-74ab-8f56-5ac933070b0e\", \"verify_leads_for_lead_finder\": true, \"verify_leads_on_import\": true, \"custom_variables\": { \"past_customer\": true, \"has_tried_competitors\": false } } }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "node-16-instantly",
+      "name": "Send to Instantly",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 180]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [{ "node": "Google Sheets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Sheets": {
+      "main": [
+        [{ "node": "Has Website?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Website?": {
+      "main": [
+        [{ "node": "Scrape Website", "type": "main", "index": 0 }],
+        [{ "node": "Ignore (no website)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Scrape Website": {
+      "main": [
+        [{ "node": "Strip HTML", "type": "main", "index": 0 }]
+      ]
+    },
+    "Strip HTML": {
+      "main": [
+        [{ "node": "Validate Website", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Website": {
+      "main": [
+        [{ "node": "Parse Validate Result", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Validate Result": {
+      "main": [
+        [{ "node": "Is Valid?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [{ "node": "Extract Email", "type": "main", "index": 0 }],
+        [{ "node": "Ignore (invalid site)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Email": {
+      "main": [
+        [{ "node": "Parse Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Email": {
+      "main": [
+        [{ "node": "Has Email?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Email?": {
+      "main": [
+        [{ "node": "Validate Email Format", "type": "main", "index": 0 }],
+        [{ "node": "Ignore (no email)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Email Format": {
+      "main": [
+        [{ "node": "Send to Instantly", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

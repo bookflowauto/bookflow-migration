@@ -1,0 +1,141 @@
+{
+  "name": "03 - Intake Form",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "node-001",
+      "name": "Intake Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "intake-form",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-002",
+      "name": "Parse Submission",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const questions = $input.item.json.body?.submission?.questions || [];\n\nconst q = (key) => (questions.find(f =>\n  f.name?.toLowerCase().includes(key)) || {}).value ?? null;\n\nlet name  = q('full name') || q('name');\nlet phone = q('phone');\nlet email = q('email');\nlet dob   = q('date') || q('birth');\n\n// Normalise phone: digits only, strip leading +\nif (phone) phone = String(phone).replace(/\\D/g, '');\n\nreturn { json: { name, phone, email, dob } };"
+      }
+    },
+    {
+      "id": "node-003",
+      "name": "Get Patient by Phone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 300],
+      "alwaysOutputData": true,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?phone=eq.{{ encodeURIComponent($json.phone) }}&select=id,name,intake_status&limit=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-004",
+      "name": "Patient Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [860, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-001",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-005",
+      "name": "Update Patient",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 180],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?id=eq.{{ $json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.fromEntries(Object.entries({ name: $('Parse Submission').item.json.name, email: $('Parse Submission').item.json.email, date_of_birth: $('Parse Submission').item.json.dob, intake_status: 'completed' }).filter(([_, v]) => v != null))) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-006",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 180],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }",
+        "options": { "responseCode": 200 }
+      }
+    },
+    {
+      "id": "node-007",
+      "name": "Respond Not Found",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 420],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": false, \"error\": \"patient not found\" }",
+        "options": { "responseCode": 404 }
+      }
+    }
+  ],
+  "connections": {
+    "Intake Form Webhook": {
+      "main": [[{ "node": "Parse Submission", "type": "main", "index": 0 }]]
+    },
+    "Parse Submission": {
+      "main": [[{ "node": "Get Patient by Phone", "type": "main", "index": 0 }]]
+    },
+    "Get Patient by Phone": {
+      "main": [[{ "node": "Patient Found?", "type": "main", "index": 0 }]]
+    },
+    "Patient Found?": {
+      "main": [
+        [{ "node": "Update Patient", "type": "main", "index": 0 }],
+        [{ "node": "Respond Not Found", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Patient": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  }
+}

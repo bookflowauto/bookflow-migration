@@ -1,0 +1,473 @@
+{
+  "name": "05 - Receipt Submission to myDATA",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "node-webhook",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 320],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "receipt-submit",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "receipt-submit"
+    },
+    {
+      "id": "node-get-context",
+      "name": "Get Appointment Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 320],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $json.body.appointmentId }}" },
+            { "name": "select", "value": "id,appointment_time,status,patient_id,practitioner_id,practitioners(name,vat_number,mydata_username,mydata_environment,rate_per_session_eur,kad_code,business_address,vat_regime),patients(name,patient_ref)" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Accept", "value": "application/vnd.pgrst.object+json" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-decrypt-key",
+      "name": "Decrypt Subscription Key",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 320],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/rpc/get_mydata_subscription_key",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_practitioner_id\": \"{{ $('Webhook Trigger').first().json.body.practitionerId }}\"\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-guard-key",
+      "name": "Has Subscription Key?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 320],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-key",
+              "leftValue": "={{ $json.data && $json.data !== 'null' && $json.data !== '\"\"' ? 'has-key' : '' }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "node-build-xml",
+      "name": "Build Receipt XML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 220],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Build the AADE myDATA SendInvoices XML envelope.\n// Reference: AADE myDATA REST API v1.0.10 — invoiceType 11.2 (APY / retail\n// receipt for services), VAT-exempt under Article 22 (clinical psychology).\n//\n// IMPORTANT: classificationType/Category/amount inside incomeClassification\n// must be in the icls namespace (note AADE's official typo: 'Classificaton').\n\nconst webhook = $('Webhook Trigger').first().json.body;\nconst ctx = $('Get Appointment Context').first().json;\nconst practitioner = ctx.practitioners || {};\nconst patient = ctx.patients || {};\n\nconst amount = Number(webhook.amount);\nif (!Number.isFinite(amount) || amount <= 0) {\n  throw new Error(`Invalid amount: ${webhook.amount}`);\n}\nconst amountStr = amount.toFixed(2);\n\nif (!practitioner.vat_number) {\n  throw new Error('Practitioner vat_number is required to issue a receipt');\n}\n\nconst issueDate = new Date(ctx.appointment_time).toISOString().split('T')[0];\n\nconst series = 'A';\nconst aa = String(Math.floor(Date.now() / 1000));\n\nconst esc = (v) => String(v ?? '')\n  .replace(/&/g, '&amp;')\n  .replace(/</g, '&lt;')\n  .replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;')\n  .replace(/'/g, '&apos;');\n\nconst patientLabel = esc(\n  `${patient.name || 'Patient'} (${patient.patient_ref || 'N/A'})`.trim(),\n);\n\nconst xml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InvoicesDoc xmlns=\"http://www.aade.gr/myDATA/invoice/v1.0\" xmlns:icls=\"https://www.aade.gr/myDATA/incomeClassificaton/v1.0\">\n  <invoice>\n    <issuer>\n      <vatNumber>${esc(practitioner.vat_number)}</vatNumber>\n      <country>GR</country>\n      <branch>0</branch>\n    </issuer>\n    <invoiceHeader>\n      <series>${series}</series>\n      <aa>${aa}</aa>\n      <issueDate>${issueDate}</issueDate>\n      <invoiceType>11.2</invoiceType>\n      <currency>EUR</currency>\n    </invoiceHeader>\n    <paymentMethods>\n      <paymentMethodDetails>\n        <type>3</type>\n        <amount>${amountStr}</amount>\n      </paymentMethodDetails>\n    </paymentMethods>\n    <invoiceDetails>\n      <lineNumber>1</lineNumber>\n      <netValue>${amountStr}</netValue>\n      <vatCategory>7</vatCategory>\n      <vatAmount>0.00</vatAmount>\n      <vatExemptionCategory>4</vatExemptionCategory>\n      <lineComments>Clinical Psychology Session - ${patientLabel}</lineComments>\n      <incomeClassification>\n        <icls:classificationType>E3_561_003</icls:classificationType>\n        <icls:classificationCategory>category1_3</icls:classificationCategory>\n        <icls:amount>${amountStr}</icls:amount>\n      </incomeClassification>\n    </invoiceDetails>\n    <invoiceSummary>\n      <totalNetValue>${amountStr}</totalNetValue>\n      <totalVatAmount>0.00</totalVatAmount>\n      <totalWithheldAmount>0.00</totalWithheldAmount>\n      <totalFeesAmount>0.00</totalFeesAmount>\n      <totalStampDutyAmount>0.00</totalStampDutyAmount>\n      <totalOtherTaxesAmount>0.00</totalOtherTaxesAmount>\n      <totalDeductionsAmount>0.00</totalDeductionsAmount>\n      <totalGrossValue>${amountStr}</totalGrossValue>\n      <incomeClassification>\n        <icls:classificationType>E3_561_003</icls:classificationType>\n        <icls:classificationCategory>category1_3</icls:classificationCategory>\n        <icls:amount>${amountStr}</icls:amount>\n      </incomeClassification>\n    </invoiceSummary>\n  </invoice>\n</InvoicesDoc>`;\n\nreturn [{ json: { xml, series, aa, amount: amountStr } }];"
+      }
+    },
+    {
+      "id": "node-submit-aade",
+      "name": "Submit to AADE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 220],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Get Appointment Context').first().json.practitioners.mydata_environment === 'production' ? 'https://mydatapi.aade.gr/myDATA/SendInvoices' : 'https://mydataapidev.aade.gr/SendInvoices' }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/xml",
+        "body": "={{ $json.xml }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/xml" },
+            { "name": "Accept", "value": "application/xml" },
+            { "name": "aade-user-id", "value": "={{ $('Get Appointment Context').first().json.practitioners.mydata_username }}" },
+            { "name": "Ocp-Apim-Subscription-Key", "value": "={{ ($('Decrypt Subscription Key').first().json.data || '').replace(/^\"|\"$/g, '') }}" }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "node-parse-xml",
+      "name": "Parse AADE Response",
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [1560, 220],
+      "parameters": {
+        "mode": "xmlToJson",
+        "dataPropertyName": "data",
+        "options": {
+          "explicitArray": false,
+          "ignoreAttrs": true,
+          "trim": true
+        }
+      }
+    },
+    {
+      "id": "node-extract-result",
+      "name": "Extract Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 220],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AADE wraps the response XML in a .NET <string> envelope. After Parse AADE\n// Response, $json looks like { string: '<?xml...><ResponseDoc>...</ResponseDoc>' }\n// where the inner content is the actual ResponseDoc as a plain (already HTML-\n// entity-decoded) XML string. We extract fields via regex — AADE responses\n// are flat and predictable, so this is more reliable than another XML parse pass.\n\nconst raw = ($json.string || '').toString();\n\nconst pick = (tag) => {\n  const m = raw.match(new RegExp(`<${tag}>([^<]+)</${tag}>`));\n  return m ? m[1] : null;\n};\n\nconst statusCode = pick('statusCode');\nconst invoiceMark = pick('invoiceMark');\nconst invoiceUid = pick('invoiceUid');\n\n// Extract every <message>...</message><code>...</code> error pair.\nconst errorRegex = /<message>([^<]*)<\\/message>\\s*<code>([^<]*)<\\/code>/g;\nconst errors = [];\nlet m;\nwhile ((m = errorRegex.exec(raw)) !== null) {\n  errors.push({ message: m[1], code: m[2] });\n}\nconst errorMessage = errors.length\n  ? errors.map(e => `[${e.code || '?'}] ${e.message || ''}`).join('; ')\n  : null;\n\nconst ok = statusCode === 'Success' && Boolean(invoiceMark);\n\nreturn [{\n  json: {\n    ok,\n    statusCode,\n    invoiceMark,\n    invoiceUid,\n    errorMessage,\n    errorCount: errors.length,\n    rawResponse: raw,\n  },\n}];"
+      }
+    },
+    {
+      "id": "node-was-ok",
+      "name": "Was Submission OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 220],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "node-update-success",
+      "name": "Update Appointment (Success)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 100],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $('Webhook Trigger').first().json.body.appointmentId }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"mydata_status\": \"submitted\",\n  \"mydata_mark\": \"{{ $('Extract Result').first().json.invoiceMark }}\",\n  \"mydata_invoice_uid\": \"{{ $('Extract Result').first().json.invoiceUid }}\",\n  \"mydata_submitted_at\": \"{{ $now.toISO() }}\"\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-log-success",
+      "name": "Log Success to Audit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/mydata_audit_log",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"practitioner_id\": \"{{ $('Webhook Trigger').first().json.body.practitionerId }}\",\n  \"appointment_id\": \"{{ $('Webhook Trigger').first().json.body.appointmentId }}\",\n  \"action\": \"submit_receipt\",\n  \"environment\": \"{{ $('Get Appointment Context').first().json.practitioners.mydata_environment }}\",\n  \"request_summary\": {\n    \"series\": \"{{ $('Build Receipt XML').first().json.series }}\",\n    \"aa\": \"{{ $('Build Receipt XML').first().json.aa }}\",\n    \"amount\": \"{{ $('Build Receipt XML').first().json.amount }}\"\n  },\n  \"response_status\": {{ $('Submit to AADE').first().json.statusCode || 200 }},\n  \"aade_mark\": \"{{ $('Extract Result').first().json.invoiceMark }}\"\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-respond-success",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2660, 100],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"ok\": true,\n  \"mark\": \"{{ $('Extract Result').first().json.invoiceMark }}\",\n  \"uid\": \"{{ $('Extract Result').first().json.invoiceUid }}\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "node-update-failure",
+      "name": "Update Appointment (Failure)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 340],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $('Webhook Trigger').first().json.body.appointmentId }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"mydata_status\": \"failed\"\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-log-failure",
+      "name": "Log Failure to Audit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 340],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/mydata_audit_log",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"practitioner_id\": {{ JSON.stringify($('Webhook Trigger').first().json.body.practitionerId) }},\n  \"appointment_id\": {{ JSON.stringify($('Webhook Trigger').first().json.body.appointmentId) }},\n  \"action\": \"submit_receipt\",\n  \"environment\": {{ JSON.stringify($('Get Appointment Context').first().json.practitioners.mydata_environment) }},\n  \"request_summary\": {\n    \"series\": {{ JSON.stringify($('Build Receipt XML').first().json.series) }},\n    \"aa\": {{ JSON.stringify($('Build Receipt XML').first().json.aa) }},\n    \"amount\": {{ JSON.stringify($('Build Receipt XML').first().json.amount) }}\n  },\n  \"response_status\": 0,\n  \"error_message\": {{ JSON.stringify($if($('Extract Result').isExecuted, $('Extract Result').first().json.errorMessage || 'AADE submission failed', 'AADE call crashed before response could be parsed')) }}\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-respond-failure",
+      "name": "Respond 500 Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2660, 340],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"ok\": false,\n  \"error\": \"{{ $if($('Extract Result').isExecuted, ($('Extract Result').first().json.errorMessage || 'AADE submission failed').replace(/\"/g, '\\\\\"'), 'AADE call crashed before response could be parsed') }}\"\n}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "node-no-key-mark-failed",
+      "name": "Mark Failed (No Key)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 460],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $('Webhook Trigger').first().json.body.appointmentId }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"mydata_status\": \"failed\"\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Supabase Bookflow (Service Role)"
+        }
+      }
+    },
+    {
+      "id": "node-respond-no-key",
+      "name": "Respond 400 No Key",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 460],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"ok\": false,\n  \"error\": \"Practitioner has no myDATA subscription key configured\"\n}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [[{ "node": "Get Appointment Context", "type": "main", "index": 0 }]]
+    },
+    "Get Appointment Context": {
+      "main": [[{ "node": "Decrypt Subscription Key", "type": "main", "index": 0 }]]
+    },
+    "Decrypt Subscription Key": {
+      "main": [
+        [{ "node": "Has Subscription Key?", "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed (No Key)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Subscription Key?": {
+      "main": [
+        [{ "node": "Build Receipt XML", "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed (No Key)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Receipt XML": {
+      "main": [[{ "node": "Submit to AADE", "type": "main", "index": 0 }]]
+    },
+    "Submit to AADE": {
+      "main": [
+        [{ "node": "Parse AADE Response", "type": "main", "index": 0 }],
+        [{ "node": "Update Appointment (Failure)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AADE Response": {
+      "main": [[{ "node": "Extract Result", "type": "main", "index": 0 }]]
+    },
+    "Extract Result": {
+      "main": [[{ "node": "Was Submission OK?", "type": "main", "index": 0 }]]
+    },
+    "Was Submission OK?": {
+      "main": [
+        [{ "node": "Update Appointment (Success)", "type": "main", "index": 0 }],
+        [{ "node": "Update Appointment (Failure)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Appointment (Success)": {
+      "main": [[{ "node": "Log Success to Audit", "type": "main", "index": 0 }]]
+    },
+    "Log Success to Audit": {
+      "main": [[{ "node": "Respond 200 OK", "type": "main", "index": 0 }]]
+    },
+    "Update Appointment (Failure)": {
+      "main": [[{ "node": "Log Failure to Audit", "type": "main", "index": 0 }]]
+    },
+    "Log Failure to Audit": {
+      "main": [[{ "node": "Respond 500 Error", "type": "main", "index": 0 }]]
+    },
+    "Mark Failed (No Key)": {
+      "main": [[{ "node": "Respond 400 No Key", "type": "main", "index": 0 }]]
+    }
+  }
+}

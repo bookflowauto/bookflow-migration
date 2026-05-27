@@ -1,0 +1,167 @@
+{
+  "name": "02c - Clinical Scribe Error Handler",
+  "active": true,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "node-001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "parameters": {}
+    },
+    {
+      "id": "node-002",
+      "name": "Fetch Failed Execution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [420, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://n8n.bookflow.uk/api/v1/executions/{{ $json.execution.id }}?includeData=true",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "", "name": "n8n API" }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "node-003",
+      "name": "Extract Error Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Pull appointmentId + error details out of the failed run.\nconst exec = $input.item.json;\nconst trigger = $('Error Trigger').item.json;\nconst runData = exec?.data?.resultData?.runData || {};\n\nlet appointmentId = null;\nconst errorMessage = exec?.data?.resultData?.error?.message\n  || trigger.execution?.error?.message\n  || 'unknown error';\nconst failedNode = exec?.data?.resultData?.lastNodeExecuted\n  || trigger.execution?.lastNodeExecuted\n  || 'unknown';\nconst executionId = trigger.execution?.id || exec?.id || null;\n\n// Preferred source: Parse Webhook output\nconst parseRun = runData['Parse Webhook'];\nif (parseRun && parseRun[0]?.data?.main?.[0]?.[0]?.json?.appointmentId) {\n  appointmentId = parseRun[0].data.main[0][0].json.appointmentId;\n}\n\n// Fallback 1: webhook query string\nif (!appointmentId) {\n  const webhookRun = runData['Session Recording Webhook'];\n  const body = webhookRun?.[0]?.data?.main?.[0]?.[0]?.json;\n  appointmentId = body?.query?.appointment_id\n    || body?.body?.query?.appointment_id\n    || null;\n}\n\n// Fallback 2: scan any node output for an appointmentId field\nif (!appointmentId) {\n  for (const nodeName of Object.keys(runData)) {\n    const out = runData[nodeName]?.[0]?.data?.main?.[0]?.[0]?.json;\n    if (out?.appointmentId) { appointmentId = out.appointmentId; break; }\n    if (out?.appointment_id) { appointmentId = out.appointment_id; break; }\n  }\n}\n\nreturn { json: { appointmentId, errorMessage, failedNode, executionId } };"
+      }
+    },
+    {
+      "id": "node-004",
+      "name": "Has appointmentId?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [860, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.appointmentId }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "node-005",
+      "name": "Mark Scribe Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 200],
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/appointments?id=eq.{{ $json.appointmentId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scribe_status: 'failed' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "node-006",
+      "name": "Log to scribe_errors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/scribe_errors",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ appointment_id: $('Extract Error Context').item.json.appointmentId, execution_id: $('Extract Error Context').item.json.executionId, failed_node: $('Extract Error Context').item.json.failedNode, error_message: $('Extract Error Context').item.json.errorMessage }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "node-007",
+      "name": "Log Orphan Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1080, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/scribe_errors",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Prefer", "value": "return=minimal" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ appointment_id: null, execution_id: $json.executionId, failed_node: $json.failedNode, error_message: $json.errorMessage }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [[{ "node": "Fetch Failed Execution", "type": "main", "index": 0 }]]
+    },
+    "Fetch Failed Execution": {
+      "main": [[{ "node": "Extract Error Context", "type": "main", "index": 0 }]]
+    },
+    "Extract Error Context": {
+      "main": [[{ "node": "Has appointmentId?", "type": "main", "index": 0 }]]
+    },
+    "Has appointmentId?": {
+      "main": [
+        [{ "node": "Mark Scribe Failed", "type": "main", "index": 0 }],
+        [{ "node": "Log Orphan Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Scribe Failed": {
+      "main": [[{ "node": "Log to scribe_errors", "type": "main", "index": 0 }]]
+    }
+  }
+}
