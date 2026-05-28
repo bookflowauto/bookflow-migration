@@ -138,6 +138,51 @@
 **New gotcha:**
 - `git add -A` at the repo root will try to commit `n8n-backup.sql` (~617 MB), which GitHub rejects (100 MB hard limit). It's now in `.gitignore`, but the safer habit is `git add <specific paths>` for any change set. Burned us once in this session — recovery was `git reset --soft HEAD~1`, `git rm --cached n8n-backup.sql`, add the gitignore entry, recommit.
 
+🔒 **SESSION 17 — HETZNER SECURITY HARDENING (2026-05-28, same session):**
+
+After deploying to Hetzner became autonomous, audited the server's production-readiness and fixed four critical security gaps in one pass:
+
+- ✅ **Container ports bound to `127.0.0.1`** ([docker-compose.yml](docker-compose.yml))
+  - Before: Postgres `0.0.0.0:5432`, n8n `0.0.0.0:5678`, dashboard `0.0.0.0:3000` were all reachable from the entire internet — bypassing Cloudflare's WAF entirely. Anyone could `psql -h 178.105.145.135` and brute-force the DB password, or DDoS the Next.js port directly.
+  - After: all three bound to `127.0.0.1` only. Cloudflare Tunnel still works because cloudflared runs ON the host and connects to `http://localhost:3000` / `localhost:5678` from inside Hetzner. The DB is now only reachable from inside the docker network (n8n uses `db:5432` over the compose network anyway).
+  - If you ever need to `psql` from your PC, use an SSH tunnel: `ssh -L 5432:127.0.0.1:5432 bookflow-hetzner` then `psql -h 127.0.0.1`.
+  - **Repo/Hetzner sync bonus:** the Hetzner-side `docker-compose.yml` had drifted significantly from the repo version (session 14 dashboard-build fix added env-var build args + a named `postgres-data` volume, but those edits were never committed back). Synced the repo to Hetzner's actual production file, then applied the port bindings + `restart: unless-stopped` on top. Future `git pull` no longer conflicts.
+
+- ✅ **UFW firewall enabled**
+  - Default-deny incoming, allow only `22/tcp` (SSH), `80/tcp`, `443/tcp` (Cloudflare-fronted HTTP/S). Both IPv4 and IPv6.
+  - Cloudflared tunnel needs zero inbound rules — it dials OUT to Cloudflare's edge.
+
+- ✅ **`.env` permissions tightened**
+  - Was `-rw-r--r--` (world-readable, contained service role keys + Stripe secret + AADE keys). Now `-rw-------` (root only).
+
+- ✅ **SSH hardened: key-only auth, no passwords**
+  - `/etc/ssh/sshd_config.d/50-cloud-init.conf`: `PasswordAuthentication no`
+  - `/etc/ssh/sshd_config`: `PermitRootLogin prohibit-password` (key-only root login still allowed — needed for Claude's deploy SSH key)
+  - `systemctl reload ssh` (not restart — keeps existing sessions alive while applying new policy).
+  - **Recovery path if the key is ever lost:** Hetzner Cloud web console can still get you into the server via the browser. The `bookflow_hetzner` ed25519 key on the user's PC at `~/.ssh/bookflow_hetzner` should be backed up to 1Password / encrypted USB.
+
+- ✅ **Restart policy unified** — all three services now `restart: unless-stopped` (was `restart: always` on dashboard only; db + n8n had no policy and would stay down after a crash).
+
+- ✅ **Docker log rotation** ([/etc/docker/daemon.json](on-server))
+  - `max-size: 10m`, `max-file: 3` per container. Caps each container's logs at ~30 MB on disk forever. Before: unbounded growth would have filled the 80 GB disk in weeks.
+  - Required `systemctl restart docker` — caused a ~10s blip on all three services, which then auto-restarted thanks to the unified restart policy.
+
+**Audit findings still open after this session:**
+- **Off-server backups** — Postgres (Hetzner) + `N8N_ENCRYPTION_KEY` not yet backed up anywhere outside the VPS. If the VPS is lost, n8n credentials become unrecoverable. Next priority.
+- **Monitoring** — no UptimeRobot, no Sentry.
+- **Resource caps on containers** — a runaway n8n workflow could OOM the 3.7 GB VPS. Add `mem_limit` per service.
+- **Stripe still on test keys** — switch to live + register live webhook secret before public signups.
+
+**Port-binding gotcha for future deploys:**
+- If you ever need to expose a new port publicly during dev/debug, bind it to `0.0.0.0:<port>:<port>` and add a matching `ufw allow` rule. Default of the new compose is `127.0.0.1` — silent-debug-failure-trap if you forget.
+
+**Files touched in this batch:**
+- `docker-compose.yml` (port bindings + restart policy + synced to Hetzner truth)
+- `/etc/ssh/sshd_config` + `/etc/ssh/sshd_config.d/50-cloud-init.conf` (server-only, not in repo)
+- `/etc/docker/daemon.json` (server-only, not in repo)
+- `/opt/bookflow-migration/.env` perms (server-only)
+- `CLAUDE.md` (this update)
+
 ---
 
 ## Tech Stack
