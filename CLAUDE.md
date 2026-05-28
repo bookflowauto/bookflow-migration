@@ -1,6 +1,6 @@
 # Bookflow Migration — CLAUDE.md
 
-**Last updated:** 2026-05-28 (session 16 — **WORKFLOW #1 END-TO-END FIXES**: Repaired corrupted "Is SMS Quota OK?" IF node, restructured patient lookup/create into upsert pattern to fix multi-event item drops, confirmed Workflow #4 confirm→intake redirect is data-state driven. Live SMS delivery verified.)
+**Last updated:** 2026-05-28 (session 17 — **MOBILE UI POLISH + AUTONOMOUS HETZNER DEPLOY**: Fixed appointment header + session-notes card layout on mobile, added DOB/age + tappable contact pills + per-patient avatar color on patient page, set up SSH key so Claude can deploy directly to Hetzner. Cloudflare Tunnel confirmed already on Hetzner — local docker is now dead weight.)
 
 ## Status Summary
 
@@ -88,6 +88,55 @@
 1. Run `supabase/16_patient_phone_unique.sql` in Supabase SQL editor. If it raises a duplicate-phone error, clean dupes first.
 2. Re-import `n8n-workflows/01-practitioner-sync/workflow.json` into n8n (overwrite existing Workflow #1).
 3. Reactivate the workflow if it gets deactivated on import.
+
+🚀 **SESSION 17 — MOBILE UI POLISH + AUTONOMOUS HETZNER DEPLOY (2026-05-28):**
+
+- ✅ **Appointment detail page mobile layout fixes** ([page.tsx](dashboard/app/dashboard/appointments/[id]/page.tsx))
+  - **Header card:** the right column used `flex-col items-end` inside a `flex-wrap` parent, so on mobile the status badges + "Mark cancelled" button awkwardly floated against the right edge while the title sat far left. Restructured to `flex-col sm:flex-row`: title + date + badges all stack cleanly left-aligned on mobile, badges sit underneath the date; the StatusActions block goes to the right column only on `sm:` and above.
+  - **Session notes card:** the title block + "Record notes" button were `flex justify-between items-center`, which on mobile squeezed the button so its label wrapped onto two lines. Restructured to `flex-col sm:flex-row` so on mobile the title sits on top and the button stretches below. Added `whitespace-nowrap shrink-0 justify-center` to the button itself so the label never wraps regardless of viewport.
+
+- ✅ **Patient detail page polish** ([page.tsx](dashboard/app/dashboard/patients/[id]/page.tsx))
+  - **DOB + age** displayed in the header row using the existing `date_of_birth` column (already populated by Workflow #3 intake). Format: `5 Jan 2000 (26)` — parentheses, not a center-dot, since the center-dot was visually mistaken for an extra separator. `age` is computed off `Date.now()` so it auto-advances; renders only if `date_of_birth` is set.
+  - **Tappable contact pills.** Email + phone are now `<a href="mailto:…">` / `<a href="tel:…">` rendered as filled pills using `bf` accent tokens (`background: var(--accent-soft)`, `color: var(--accent)`, rounded). They're now visually distinct from the muted DOB row, so mobile users see at a glance that they tap them — and on mobile they actually launch the dialer / mail app.
+  - **Greek phone display.** Phones are stored Infobip-format (`306978169293`, no `+`). For *display* we strip the leading `30` when the number matches `^30\d{10}$` so practitioners see `6978169293` — the readable Greek mobile number. The `tel:` href keeps the full `+306978169293` so international calls still route correctly.
+  - **Per-patient avatar color.** Previously every avatar circle was the same teal. Now we hash `patient.id` into a fixed 7-color palette (teal / blue / violet / pink / orange / emerald / amber) using soft-bg + matching-fg pairs. Patients are visually distinguishable at a glance in screenshots and side-by-side comparisons. Palette + hash live inline in [page.tsx](dashboard/app/dashboard/patients/[id]/page.tsx) — small enough not to deserve a helper module yet.
+  - **Reverted the "Billed €" mini-stat** added earlier in the same session. The user disliked currency surfaced as a top-line stat; receipts will get their own surface later. The underlying `mydata_amount_eur` column + save logic in the issue-receipt route is **kept** — harmless and future-ready.
+
+- ✅ **`mydata_amount_eur` persistence** ([17_mydata_amount.sql](supabase/17_mydata_amount.sql), [issue-receipt/route.ts](dashboard/app/api/appointments/[id]/issue-receipt/route.ts))
+  - New nullable `DECIMAL(10,2)` column on `appointments`. The issue-receipt API route now writes the submitted amount alongside flipping `mydata_status='pending'`. Old rows stay null (no backfill needed). User ran the migration in Supabase SQL editor manually.
+
+- ✅ **SSH key for autonomous Hetzner deploys**
+  - Generated `~/.ssh/bookflow_hetzner` (ed25519, no passphrase) on the user's PC and added an SSH config alias `bookflow-hetzner` (HostName 178.105.145.135, user root, IdentityFile + IdentitiesOnly).
+  - User authorized the public key on Hetzner by appending it to `/root/.ssh/authorized_keys`. Verified with a non-interactive `ssh bookflow-hetzner` round-trip.
+  - **Result:** Claude can now SSH to Hetzner without prompting. No password needed. The repo lives at `/opt/bookflow-migration` on the server.
+  - **Important:** Hetzner uses `docker compose` (v2 syntax, space), NOT `docker-compose`. The latter is not installed.
+
+- ✅ **Cloudflare Tunnel confirmed to already be on Hetzner**
+  - We discovered cloudflared was set up on Hetzner on 2026-05-28 at 00:09 UTC by an earlier session step that wasn't documented. Tunnel name `bookflow-hetzner` (ID `1c236fe9-5622-4065-b5b6-7f0afa7d0a55`), running as a systemd service from `/etc/cloudflared/config.yml`.
+  - Routes: `app.bookflow.uk → http://localhost:3000`, `n8n.bookflow.uk → http://localhost:5678`. DNS records already CNAME to this tunnel (`cloudflared tunnel route dns` reported "already configured" for both).
+  - **Implication:** the user's local Windows docker stack has been dead weight for at least a day — public traffic has been hitting Hetzner the whole time. Local docker can now be shut down (`docker-compose down` on Windows) with no impact, and the local cloudflared (if still running) can be stopped too.
+
+**Standard deploy flow from now on (Claude executes autonomously):**
+1. Edit code locally in `F:\Bookflow\App\bookflow-migration`.
+2. `git add` + `git commit` with a descriptive message (NEVER `git add -A` blind — the repo root contains a 617 MB `n8n-backup.sql` file that gets accidentally swept in; it's now in `.gitignore` but stay specific with adds anyway).
+3. `git push origin main`.
+4. `ssh bookflow-hetzner "cd /opt/bookflow-migration && git pull && docker compose up -d --build dashboard"`.
+5. Verify: `ssh bookflow-hetzner "curl -s -o /dev/null -w 'HTTP %{http_code}\n' http://localhost:3000/login"` should return 200.
+6. Tell the user when done. Hard-refresh in browser to bust the CDN/local cache.
+
+**SQL migrations are NOT auto-deployed.** When the diff includes a new `supabase/*.sql` file, Claude must call it out in the response and ask the user to paste it into Supabase SQL Editor. The Supabase DB is cloud-hosted, not on Hetzner, and Claude has no service-role access from the dev environment.
+
+**Files touched:**
+- `dashboard/app/dashboard/appointments/[id]/page.tsx`
+- `dashboard/app/dashboard/patients/[id]/page.tsx`
+- `dashboard/app/api/appointments/[id]/issue-receipt/route.ts`
+- `dashboard/lib/i18n/dictionary.ts`
+- `supabase/17_mydata_amount.sql` (new)
+- `.gitignore` (added `n8n-backup.sql` and `*.sql.bak`)
+- `CLAUDE.md` (this update)
+
+**New gotcha:**
+- `git add -A` at the repo root will try to commit `n8n-backup.sql` (~617 MB), which GitHub rejects (100 MB hard limit). It's now in `.gitignore`, but the safer habit is `git add <specific paths>` for any change set. Burned us once in this session — recovery was `git reset --soft HEAD~1`, `git rm --cached n8n-backup.sql`, add the gitignore entry, recommit.
 
 ---
 
