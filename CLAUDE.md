@@ -1,6 +1,37 @@
 # Bookflow Migration — CLAUDE.md
 
-**Last updated:** 2026-05-28 (session 17 — **MOBILE UI POLISH + AUTONOMOUS HETZNER DEPLOY**: Fixed appointment header + session-notes card layout on mobile, added DOB/age + tappable contact pills + per-patient avatar color on patient page, set up SSH key so Claude can deploy directly to Hetzner. Cloudflare Tunnel confirmed already on Hetzner — local docker is now dead weight.)
+**Last updated:** 2026-05-28 (session 17 — **MOBILE UI POLISH + AUTONOMOUS HETZNER DEPLOY + SECURITY HARDENING**: Fixed mobile UI on appointment + patient pages, set up SSH key for autonomous deploys, discovered Cloudflare Tunnel was already on Hetzner, then closed 4 critical security holes — port bindings, UFW, .env perms, SSH key-only. Server is now **running 24/7 production-ready** for first paying customer.)
+
+## Production Status — Running 24/7 on Hetzner
+
+**Live URL:** https://app.bookflow.uk (Cloudflare Tunnel → Hetzner VPS, Falkenstein DE).
+
+**The stack survives without your PC.** You can shut down your laptop, the service stays up:
+- Hetzner VPS (CPX22, €9.91/mo) is always on
+- All 3 docker containers (`db`, `n8n`, `dashboard`) have `restart: unless-stopped`
+- `cloudflared` runs as a systemd service (auto-starts on boot)
+- Public traffic: Cloudflare edge → Hetzner tunnel → `localhost:3000` / `localhost:5678` inside the VPS
+
+**What's secured (session 17):**
+- ✅ Container ports bound to `127.0.0.1` only — no public exposure of Postgres, n8n editor, or Next.js
+- ✅ UFW firewall: deny incoming except 22/80/443
+- ✅ SSH key-only authentication, no password login, root login via key only
+- ✅ `.env` chmod 600 (was world-readable)
+- ✅ Docker log rotation (10 MB × 3 per container) — disk can't fill from runaway logs
+
+**What's NOT yet hardened (deferred until first paying customer):**
+- 🟡 **Off-server Postgres backup** — Hetzner DB has no nightly dump going anywhere off-server. If the VPS is lost, you lose n8n workflow history + audit logs. (Supabase has its own backups on the cloud-hosted side.)
+- 🟡 **`N8N_ENCRYPTION_KEY` not backed up off-server** — it's `bookflow123!@@$$$`, easy to remember, but worth dropping into 1Password.
+- 🟡 **SSH private key (`~/.ssh/bookflow_hetzner`)** — losing it = needing Hetzner web console to recover. Should be backed up off-PC.
+- 🟡 **Monitoring** — no UptimeRobot ping, no Sentry error tracking. Silent failures stay silent.
+- 🟡 **Container memory caps** — a runaway n8n workflow could OOM the 3.7 GB VPS.
+- 🟡 **Stripe still on test keys** — switch to live + register live webhook secret before charging real customers.
+- 🟡 **`bookflow.uk` marketing landing page** — doesn't exist yet.
+
+**Disaster recovery realities right now:**
+- Best case (VPS reboots, no data loss): cloudflared + docker daemon both auto-start, all containers come up, public URL recovers in ~60s. No human action needed.
+- Worst case (VPS lost / corrupted): you'd lose n8n workflow run history + audit logs from the Hetzner Postgres. App data is safe (Supabase cloud). Recovery = spin up new VPS, install docker + cloudflared, restore tunnel credentials, `docker compose up`, re-import workflow JSONs from `n8n-workflows/`, re-enter n8n credentials manually (because `N8N_ENCRYPTION_KEY` is gone unless backed up). Estimated downtime: 2–4 hours.
+- This risk is acceptable while you have zero paying customers. It is NOT acceptable the day you flip Stripe to live.
 
 ## Status Summary
 
