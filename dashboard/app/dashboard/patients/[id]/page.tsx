@@ -31,14 +31,12 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
     ? new Date(patient.date_of_birth).toLocaleDateString(bcp, { day: 'numeric', month: 'short', year: 'numeric' })
     : null
 
-  // Strip Greek country code prefix for display, but keep it in tel: link
+  // Strip Greek country code prefix from both display and tel: link
   const phoneDisplay =
     patient.phone && /^30\d{10}$/.test(patient.phone)
       ? patient.phone.slice(2)
       : patient.phone
-  const phoneHref = patient.phone
-    ? (patient.phone.startsWith('+') ? patient.phone : `+${patient.phone}`)
-    : null
+  const phoneHref = phoneDisplay ?? null
 
   // Deterministic per-patient avatar color so each patient is visually distinguishable
   const AVATAR_PALETTE = [
