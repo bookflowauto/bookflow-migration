@@ -90,6 +90,7 @@ export async function POST(
     .update({
       mydata_status: 'pending',
       mydata_pending_at: new Date().toISOString(),
+      mydata_amount_eur: amount,
     })
     .eq('id', appointmentId)
 

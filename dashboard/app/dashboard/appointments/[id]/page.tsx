@@ -65,8 +65,8 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
 
       {/* Header card */}
       <div className="bf-card p-6 mb-6">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+          <div className="min-w-0">
             <p className="text-xs uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>
               {t('appointment.title')}
             </p>
@@ -74,9 +74,7 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
               {apt.summary || t('appointment.session')}
             </h1>
             <p className="text-sm mt-1.5" style={{ color: 'var(--text-muted)' }}>{formattedTime}</p>
-          </div>
-          <div className="flex flex-col items-end gap-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 mt-3 flex-wrap">
               <StatusBadge value={apt.status} label={t(statusKey)} />
               <ScribeBadge
                 value={apt.scribe_status}
@@ -86,6 +84,8 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
                 failedLabel={t('scribe.failed')}
               />
             </div>
+          </div>
+          <div className="sm:flex sm:flex-col sm:items-end shrink-0">
             <StatusActions
               appointmentId={apt.appointment_id}
               status={apt.status}
@@ -100,8 +100,8 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
         <div className="lg:col-span-2 space-y-6">
           {/* Transcript */}
           <div className="bf-card p-6">
-            <div className="flex justify-between items-center mb-4">
-              <div>
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+              <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                   {t('appointment.sessionNotes')}
                 </p>
@@ -114,7 +114,7 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
                   href={`${process.env.NEXT_PUBLIC_SCRIBE_FORM_URL}?appointment_id=${apt.appointment_id}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="bf-btn-primary inline-flex items-center gap-1.5"
+                  className="bf-btn-primary inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />

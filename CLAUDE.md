@@ -1,6 +1,6 @@
 # Bookflow Migration — CLAUDE.md
 
-**Last updated:** 2026-05-27 (session 13 — Settings Tier 1 shipped: Profile + Security + Notifications tabs. Workflow #1 now reads `sms_reminder_enabled` + `reminder_offset_hours` from practitioner row.)
+**Last updated:** 2026-05-28 (session 16 — **WORKFLOW #1 END-TO-END FIXES**: Repaired corrupted "Is SMS Quota OK?" IF node, restructured patient lookup/create into upsert pattern to fix multi-event item drops, confirmed Workflow #4 confirm→intake redirect is data-state driven. Live SMS delivery verified.)
 
 ## Status Summary
 
@@ -41,6 +41,54 @@
 - **Calendar page** — `/dashboard/calendar` route delivered. Day / Week / Month views (week is default), URL-driven state (`?view=week&date=YYYY-MM-DD`) for shareable links + browser back/forward, click an appointment → slide-out detail panel with workflow signals (intake ✓ / SOAP ✓ / receipt ✓) and links to the full `/dashboard/appointments/[id]` page. Current-time line in day/week, "today" highlight in month, mobile defaults to day view. RLS-scoped server fetch via `v_appointment_full`. 50-minute default block size (no `end_time` column yet). Files in `dashboard/app/dashboard/calendar/` (utils + page + Calendar + CalendarHeader + DayView + WeekView + MonthView + AppointmentBlock + AppointmentPanel + loading). "+ New appointment" button is intentionally disabled with a tooltip — appointments still flow from GCal sync via Workflow #1; inline create is deferred until GCal write integration ships.
 - **Dashboard i18n (Greek ↔ English language toggle)** — Phase A + Phase B complete. New `practitioners.locale` column (default `'el'`, target market is Greek), `/api/practitioner-settings/locale` PATCH endpoint that writes DB + mirrors the value to a `bf_locale` cookie for fast SSR reads. Hand-rolled `lib/i18n/` package: typed `dictionary.ts` (~210 keys, source-of-truth shape comes from the English dict), `server.ts` (`getLocale()` cookie-first with DB fallback + `getT()` for server components), `client.tsx` (`LocaleProvider` + `useT()` hook). `LocaleProvider` mounted at the root layout — covers auth pages too — so `<html lang>` is dynamic. Settings → General has a two-button segmented "Language" toggle (English / Ελληνικά) with optimistic UI and `router.refresh()` on save. Every dashboard surface translated: Sidebar, Settings (General + myDATA), Calendar (header, day labels, panel), Patients (list + detail + RegenerateSoap), Appointments (detail + TranscriptEditor + StatusActions + IssueReceiptModal + ReceiptSection), Billing (page + PlanSelector with localized plan features + ManageButton), Login/Forgot/Reset auth pages, LogoutButton, ThemeToggle. All `toLocaleString` / `toLocaleDateString` calls now use the `bcp` value from `useT()`/`getT()` (`el-GR` or `en-GB`) so weekday/month names flip with the toggle. Patient-facing `/confirm/*` pages remain Greek-only by design (their audience is the patient, not the practitioner).
 
+🚀 **SESSION 14 — REMOTE INFRASTRUCTURE LIVE (2026-05-27):**
+- ✅ **Git repository** — GitHub private repo at https://github.com/bookflowauto/bookflow-migration. All source code, migrations, n8n workflows, .env ignored via .gitignore. `.env.example` as reference template.
+- ✅ **Hetzner VPS** — CPX22 (2 vCPU, 4GB RAM, 80GB SSD, €9.91/mo) running in Falkenstein, Germany. IP: `178.105.145.135`. EU data residency (GDPR compliant).
+- ✅ **Docker containerized** — All services running 24/7 on Hetzner via docker-compose:
+  - **PostgreSQL 16** — `bookflow-migration-db-1` on port 5432. Persists to `postgres-data` volume.
+  - **n8n** — `bookflow-migration-n8n-1` on port 5678. Database: internal Postgres. Workflows #1–#5 live (Practitioner Sync, Clinical Scribe, Intake Form, Confirmation, Receipt Submission).
+  - **Next.js Dashboard** — `bookflow-migration-dashboard-1` on port 3000. Built with env vars passed as docker-compose build args. All routes working (auth, dashboard, settings, calendar, billing, appointments).
+- ✅ **Dashboard Docker build fixed** — Resolved `supabaseUrl is required` error. Solution: (1) Pass env vars as build args in docker-compose.yml, (2) Set ENV in Dockerfile before `npm run build`, (3) Copy dashboard source to correct WORKDIR, (4) Fixed n8n image name from `docker.n8n.io/n8n` to `n8nio/n8n`.
+- ⏳ **Cloudflare Tunnel** — Still points to localhost on user's machine. Next session: Install cloudflared on Hetzner, configure tunnels (`n8n.bookflow.uk` → localhost:5678, `app.bookflow.uk` → localhost:3000), then test end-to-end.
+- **Database backups** — TODO (next session): Nightly pg_dump to Cloudflare R2 (€0/mo at this volume). Critical: back up N8N_ENCRYPTION_KEY separately.
+- **Monitoring** — TODO (next session): Sentry for dashboard + n8n errors, UptimeRobot for uptime alerts.
+
+🚀 **SESSION 15 — n8n WORKFLOW DEBUGGING (2026-05-28):**
+- ✅ **Workflow #1 Supabase API authentication fixed** — Debugged "No API key found in request" → "Invalid API key" errors.
+  - **Root cause:** n8n HTTP Request node was sending `Authorization: Bearer {key}` header, but Supabase REST API requires `apikey: {key}` header format.
+  - **Fix:** Changed header configuration from `Authorization` to `apikey`, removed Bearer prefix from value.
+  - **Result:** Corrected header format resolved authentication issue. Workflow #1 header now properly: Name=`apikey`, Value=`sb_secret_...`
+- ✅ **Workflow #1 execution verified** — Ran "Execute step" on Get Active Practitioners node successfully at 04:48:05 UTC (status: Succeeded in 2.6325s).
+  - Retrieved 1 item (Dr. Meimaris practitioner), returned practitioners with sms_reminder_enabled + reminder_offset_hours fields (ready for notification preference gating).
+  - Full workflow flow confirmed: Hourly Trigger → Get Active Practitioners → [remaining 12 nodes to test in next session].
+- ⏳ **SMS send verification deferred** — Workflow execution succeeded but actual SMS delivery status (whether Send SMS node fired, patient phone found, quota OK, etc.) needs tracing next session. Left at successful execution with full node pipeline visible.
+- **Supabase clarification:** Supabase cloud-hosted PostgreSQL runs 24/7 on Supabase infrastructure (not on Hetzner). Only Hetzner services (PostgreSQL for n8n config + n8n itself + dashboard) need 24/7 Hetzner VPS runtime.
+
+**Key findings:**
+- n8n HTTP Request nodes don't auto-inject credential headers in all cases — "Send Headers" toggle must be ON and the credential format must match the API's expected header name/format.
+- Supabase REST API uses `apikey` header (not standard `Authorization` Bearer pattern) — consult API docs before assuming Bearer format.
+- Workflow execution "Succeeded" status does not guarantee all branches fired or actions completed — must trace individual node outputs to confirm behavior (e.g., SMS actually sent vs. skipped due to quota/missing phone).
+
+🚀 **SESSION 16 — WORKFLOW #1 END-TO-END FIXES (2026-05-28):**
+- ✅ **"Is SMS Quota OK?" IF node was corrupted** — node had no `conditions` configured (or stale internal state), causing all items to silently fall to the False Branch regardless of `quota_exceeded` value. Manually re-adding the condition in the n8n UI did not stick; clicking "Execute step" with input `quota_exceeded=false` and condition `quota_exceeded equals false` still produced False Branch output. **Fix:** deleted the IF node and recreated it from scratch + re-imported workflow.json. After recreation, condition evaluated correctly. Bug appeared to be pure n8n UI/state corruption — the workflow.json on disk always had a valid condition (`{ leftValue: '{{ $json.quota_exceeded }}', rightValue: true, operator: notEqual }`), but n8n's runtime ignored it.
+- ✅ **Workflow #1 patient lookup/create restructured** — was 4 nodes (Get Patient by Phone → Patient Found? IF → Create Patient → Resolve Patient ID code merger). For multi-event runs (e.g. 2 GCal events with different phones, one matching existing patient + one new), the new patient was silently dropped between Get Patient by Phone and downstream nodes. Root cause: n8n HTTP Request v4 node's `alwaysOutputData` toggle does NOT emit a placeholder per input item when an individual item's response is `[]` (empty array) — it only emits a global placeholder when the entire node produced zero outputs. So for 2 input items where one returned `[{patient}]` and the other returned `[]`, the second item vanished.
+  - **Fix:** replaced the 4 nodes with 3 — **Upsert Patient** (POST `/patients?on_conflict=phone` with `Prefer: resolution=ignore-duplicates,return=minimal`), **Get Patient ID** (GET `/patients?phone=eq.{phone}&select=id`, always returns 1 row because upsert just ensured it exists), **Resolve Patient ID** (Code node, normalises `{id}` → `{patient_id}` for downstream compatibility).
+  - **Required migration:** `supabase/16_patient_phone_unique.sql` adds `UNIQUE (phone)` constraint on patients table (with a guard DO block that fails loudly if existing duplicate phones would block it). NULL phones are still allowed (multiple patients without a phone, by Postgres UNIQUE semantics).
+  - **Behaviour preserved:** for existing patients, name + intake_status are NOT overwritten (ignore-duplicates skips the row entirely). For new patients, inserted with `intake_status='pending'`, name from GCal title. `patient_ref` (PT-0001…) still auto-generated by the existing trigger.
+- ✅ **Workflow #4 (Confirmation) confirmed working as designed** — user reported "clicking confirm doesn't redirect to intake form". Investigation: the test patient (Michael Meimaris) had `intake_status='completed'` in the DB from prior testing, so `actions.ts` correctly skipped the intake redirect branch and went straight to `/confirm/[id]/done`. Verified `NEXT_PUBLIC_INTAKE_FORM_URL` env var IS set on the Hetzner dashboard container (`docker exec ... env | grep INTAKE`). Reset `patients.intake_status='pending'` + `appointments.status='scheduled'` for the test row, re-clicked confirm → correctly redirected to Fillout intake form. **No code change needed.** Behaviour is correct for production: real new patients default to `intake_status='pending'` (set by Upsert Patient node above), so first confirm click always redirects them to the intake form.
+- ✅ **Live SMS delivery verified end-to-end** — after the IF node + upsert fixes + workflow re-import, manual workflow trigger on 2 GCal events with different phones successfully: parsed both events → upserted both patients (1 existing + 1 new with auto `patient_ref`) → upserted both appointments → sent 2 reminder SMSs via Infobip → logged both to `sms_log` with status='sent'.
+- ✅ **Fillout intake form "Birth Date" field rename — no backend change** — user renamed the date field from "Date of Birth" to "Birth Date" in Fillout. Workflow #3's `Parse Submission` code node uses lenient matching: `q('date') || q('birth')` finds any question whose lowercased name contains either substring. "Birth Date" still matches via the `'birth'` branch. Value format on the wire is still ISO `YYYY-MM-DD` regardless of UI display.
+
+**Files touched:**
+- `supabase/16_patient_phone_unique.sql` (new — UNIQUE constraint on `patients.phone`)
+- `n8n-workflows/01-practitioner-sync/workflow.json` (replaced Get Patient by Phone + Patient Found? + Create Patient + Resolve Patient ID with Upsert Patient + Get Patient ID + Resolve Patient ID; also synced the "Is SMS Quota OK?" IF node condition to match the recreated live version: `quota_exceeded equals false`)
+- `CLAUDE.md` (this update)
+
+**To apply on Hetzner next time:**
+1. Run `supabase/16_patient_phone_unique.sql` in Supabase SQL editor. If it raises a duplicate-phone error, clean dupes first.
+2. Re-import `n8n-workflows/01-practitioner-sync/workflow.json` into n8n (overwrite existing Workflow #1).
+3. Reactivate the workflow if it gets deactivated on import.
+
 ---
 
 ## Tech Stack
@@ -78,7 +126,9 @@ bookflow-migration/
 │   ├── 10_regenerate_soap_usage.sql # regenerate_soap_count tracking
 │   ├── 11_mydata.sql       # myDATA credentials + audit log (UPDATED session 8)
 │   ├── 12_mydata_pending_at.sql  # mydata_pending_at timestamp (Session 9)
-│   └── 13_locale.sql       # practitioners.locale en|el, default 'el' (Session 10)
+│   ├── 13_locale.sql       # practitioners.locale en|el, default 'el' (Session 10)
+│   ├── 15_practitioner_notifications.sql  # sms_reminder_enabled + reminder_offset_hours + email_digest_enabled (Session 13)
+│   └── 16_patient_phone_unique.sql        # UNIQUE(phone) on patients (Session 16 — required for Workflow #1 upsert)
 ├── dashboard/              # Next.js app (app.bookflow.uk)
 │   ├── app/
 │   │   ├── layout.tsx
@@ -460,10 +510,10 @@ NEXT_PUBLIC_APP_URL=https://app.bookflow.uk    # Used in Stripe redirects and SM
 3. **Split Practitioners** — pass-through code node (HTTP already split into items)
 4. **Get Events ~24h Ahead** — Google Calendar getAll, calendar_id from `$json.calendar_id`, window `$now` → `$now + 24h`, singleEvents=true
 5. **Parse Event** — extract patient name from event.summary (strip prefixes/parens), normalise phone from event.description to `306979244944` Infobip format (handles +30, spaces, dashes; auto-prepends `30` for 10-digit Greek mobiles starting with 6)
-6. **Get Patient by Phone** — Supabase lookup by phone (alwaysOutputData=true so empty results don't drop the item)
-7. **Patient Found?** — IF on `$json.id` notEmpty (string)
-8. **Create Patient** (false branch) — POST patients, intake_status=pending
-9. **Upsert Appointment** — POST appointments with `?on_conflict=google_event_id` and `Prefer: resolution=merge-duplicates,return=representation`. Body references `$('Parse Event')`, `$('Split Practitioners')`, and `$json.id` for patient_id.
+6. **Upsert Patient** *(Session 16 rewrite)* — POST `/patients?on_conflict=phone` with `Prefer: resolution=ignore-duplicates,return=minimal`, body `{name, phone, intake_status: 'pending'}`. Inserts new patient if phone is new, silently skips if phone exists (does NOT overwrite name/intake_status on existing rows). Requires `UNIQUE(phone)` from migration 16.
+7. **Get Patient ID** *(Session 16 rewrite)* — GET `/patients?phone=eq.{phone}&select=id&limit=1`. Always returns 1 row because Upsert Patient just ensured it exists, sidestepping n8n's empty-array per-item drop bug.
+8. **Resolve Patient ID** — Code node, normalises `{id}` → `{patient_id}` so downstream nodes stay unchanged.
+9. **Upsert Appointment** — POST appointments with `?on_conflict=google_event_id` and `Prefer: resolution=merge-duplicates,return=representation`. Body references `$('Parse Event')`, `$('Split Practitioners')`, and `$json.patient_id`.
 10. **Check SMS Already Sent** — relational query `appointments?id=eq.{{id}}&select=id,sms_log(id,status)` (one row per appointment guaranteed; alwaysOutputData=true)
 11. **Should Send SMS?** — IF (a) `($json.sms_log || []).filter(l => l.status === 'sent').length === 0` AND (b) `$('Parse Event').item.json.patient_phone` notEmpty
 12. **Send SMS** — Infobip POST with Greek reminder text + confirmation link `https://app.bookflow.uk/confirm/{appointment_id}`
@@ -473,6 +523,7 @@ NEXT_PUBLIC_APP_URL=https://app.bookflow.uk    # Used in Stripe redirects and SM
 
 **Key dedup mechanisms:**
 - `google_event_id` UNIQUE on appointments → upsert prevents duplicate appointments
+- `phone` UNIQUE on patients *(Session 16)* → upsert prevents duplicate patient rows AND sidesteps n8n HTTP node's empty-array per-item drop bug
 - Embedded relational query in Check SMS Already Sent guarantees consistent item flow (avoids n8n auto-dropping empty results from separate sms_log query)
 - sms_log filtered by status='sent' prevents resending
 
@@ -875,35 +926,38 @@ Three tiers. All paid tiers include every feature; what scales is depth and limi
 
 ---
 
-## 🚀 IMMEDIATE NEXT STEPS (Session 13 → 14)
+## 🚀 IMMEDIATE NEXT STEPS (Session 15 → 16)
 
-Settings Tier 1 + Workflow #1 notification wiring shipped (Session 13). All built locally, **not yet verified live** — see Pending Verification at the bottom of this section.
+**Workflow #1 authentication fixed on Hetzner (Session 15).** Supabase API header format corrected (`apikey` instead of `Authorization: Bearer`). Workflow now executes successfully, but end-to-end SMS delivery chain needs verification.
 
-1. **Settings Tier 2 — SMS template editor** (recommended next, small)
-   - Practitioner edits the Greek reminder copy + confirmation link wording. Workflow #1 currently hardcodes both.
+**Priority tasks for next session:**
+
+1. **Complete Workflow #1 SMS chain verification** (HIGH PRIORITY)
+   - Trace execution of "Should Send SMS?" → "Check SMS Already Sent" → "Send SMS" nodes
+   - Verify SMS actually delivered (not skipped due to quota, missing phone, already sent, or toggle off)
+   - Check sms_log for sent records with correct status + Infobip msg ID
+   - Test with a real appointment in GCal → trigger hourly workflow manually → confirm SMS arrives at test number
+
+2. **Test remaining workflows (Workflows #2, #3, #5)** — verify end-to-end execution on Hetzner
+   - Workflow #2 (Scribe): upload audio via Fillout form → Whisper transcription → GPT SOAP merge → check merged_clinical_summary on patient record
+   - Workflow #3 (Intake): submit Fillout form → patient lookup/creation → appointment link
+   - Workflow #5 (Receipt): issue receipt from dashboard → n8n webhook trigger → myDATA submission → verify appointment gets mydata_status + mark
+
+3. **Settings Tier 1 live verification** (from Session 13, deferred to Session 14+)
+   - Run `supabase/15_practitioner_notifications.sql` in Supabase SQL editor if not yet run
+   - `docker-compose up -d --build dashboard` to activate 5-tab settings page on Hetzner
+   - Re-import updated Workflow #1 into n8n (includes notification preference reading)
+   - Walk through: flip SMS reminder toggle OFF → wait for next hourly trigger → confirm NO SMS sent (via Executions history)
+
+4. **Settings Tier 2 — SMS template editor** (recommended next, small)
+   - Practitioner edits Greek reminder copy + confirmation link wording. Workflow #1 currently hardcodes both.
    - Schema: add `sms_reminder_template TEXT` to `practitioners` with sane default; render via `{patient_name}`, `{time}`, `{link}` placeholders.
-   - Compounds with the notification wiring just done — same Workflow #1 area, same Settings page area.
+   - Compounds with notification wiring — same Workflow #1 area, same Settings page.
 
-2. **FeatureGate the longitudinal SOAP merge** (~20 min cleanup)
-   - Wrap merged-SOAP block on patient detail page with `<FeatureGate feature="longitudinalMerge">` so Essentials sees the upgrade CTA. UI honesty fix.
-   - When structured SOAP / timeline PDF / full-text search land, gate them with the matching feature keys already declared in `lib/plans.ts`.
-
-3. **Open Sprint 3 — Professional tier unlock**
-   - Editable structured SOAP (JSONB `soap_structured`, four fields instead of one blob)
-   - Full-text search across transcripts (Postgres `tsvector` + `unaccent` for Greek)
-   - Full-patient-timeline PDF export
-   - Multiple intake templates
-
-4. **Production launch prep**
+5. **Production launch prep** (deferred to post-Sprint 3)
    - Switch Stripe from test → live keys, register live webhook with correct signing secret
    - Rebuild the marketing landing page (bookflow.uk)
    - Onboard a second test practitioner end-to-end
-
-### Pending verification (Session 13 deferred)
-- Run `supabase/15_practitioner_notifications.sql` in Supabase SQL editor.
-- `docker-compose up -d --build dashboard` to ship the 5-tab settings page.
-- Open Workflow #1 in n8n → Import from File → pick the updated `workflow.json` → Save → Activate.
-- Walk through each new tab: edit profile, change password, flip SMS toggle, change offset to e.g. 48h. Verify next hourly tick respects the toggle (no Infobip call when disabled) and uses the new window.
 
 ---
 
@@ -1145,6 +1199,18 @@ Features that came up during pricing strategy but were intentionally deferred.
 ---
 
 ## Gotchas to Remember
+
+### n8n & Supabase Integration (Session 15 lesson)
+- **n8n HTTP Request credential headers require `Send Headers` toggle ON.** Even if a credential is selected (e.g., "Supabase Service Role"), the headers won't be sent unless the "Send Headers" toggle is explicitly enabled. Without it, HTTP requests fail with 401 "No API key found."
+- **Supabase REST API uses `apikey` header, not `Authorization: Bearer`.** Unlike standard OAuth patterns, Supabase expects: `apikey: {service_role_key}` (not `Authorization: Bearer {key}`). When configuring n8n HTTP credentials for Supabase, change the header name to `apikey` and remove any Bearer prefix from the value. Failure to do this results in "Authorization failed — please check your credentials" errors.
+- **Workflow execution "Succeeded" status doesn't guarantee all branches fired.** A workflow can execute without errors but skip SMS send due to quota limits, missing patient phone, SMS already sent to that appointment, or practitioner's SMS reminder toggle being OFF. Always trace individual node outputs in Executions history to confirm expected behavior (e.g., SMS actually sent vs. skipped).
+
+### n8n quirks (Session 16 lessons)
+- **n8n IF (v2) nodes can silently lose their conditions and silently route everything to False Branch.** Symptom: input data clearly satisfies the configured condition (e.g. `quota_exceeded=false` against condition `quota_exceeded equals false`), but the IF still routes to False Branch even after clicking Execute step. Re-typing the condition in the UI may not stick — the runtime keeps using a stale/empty internal condition. **Fix:** delete the IF node entirely and recreate it from scratch (or re-import the workflow.json fresh). The `workflow.json` on disk may have a perfectly valid condition while the live n8n instance ignores it. Suspect this anywhere the output panel persistently shows "False Branch" with valid True-satisfying input.
+- **n8n HTTP Request v4 + JSON-array response + empty `[]` = the input item gets silently dropped, even with "Always Output Data" ON.** The `alwaysOutputData` toggle only emits a placeholder when the *entire node execution* produced zero outputs — not when an *individual input item's* response was empty. So if 2 input items come in and one returns `[{patient}]` and the other returns `[]`, the second item vanishes from the output stream. **Symptom:** Parse Event shows 2 items → downstream HTTP lookup shows 1 item. **Fix:** restructure to upsert-then-select instead of lookup-then-IF-then-create. The upsert guarantees the row exists, and the follow-up select always returns 1 row per item. This is exactly the pattern Workflow #1 uses now (Upsert Patient + Get Patient ID + Resolve Patient ID, replacing the old 4-node lookup/branch/create/merge chain).
+- **Fillout date fields' wire format is ISO `YYYY-MM-DD`** regardless of the picker's display format. Safe to write directly into Postgres `DATE` columns.
+- **Workflow #4 (Confirmation → Intake redirect) is data-state driven, not env driven.** If the confirmation page redirects to `/confirm/[id]/done` instead of the Fillout intake form, the cause is almost always `patients.intake_status !== 'pending'` (i.e. already completed from prior testing or a real prior intake submission), NOT a missing `NEXT_PUBLIC_INTAKE_FORM_URL` env var. To test the intake-redirect branch, reset `intake_status='pending'` + `appointments.status='scheduled'` on the row first. Real new patients (created by Workflow #1's Upsert Patient) default to `intake_status='pending'`, so the redirect fires correctly on first confirm.
+- **Supabase upsert with `Prefer: resolution=merge-duplicates` overwrites ALL fields sent in the body** for conflicting rows — there's no per-field "only if null" semantic. If you want lookup-or-create semantics WITHOUT clobbering existing data, use `Prefer: resolution=ignore-duplicates` and follow up with a separate SELECT. That's what Workflow #1's Upsert Patient does — existing patients keep their name + intake_status, and the SELECT after fetches the id either way.
 
 - **i18n source-of-truth is the English dict.** `dictionary.ts` exports `en` as `const`, derives `TranslationKey = keyof typeof en`, then types `el: Dictionary` against it. If you add a key to one dict and forget the other, TypeScript catches it at build. Never add a Greek-only or English-only key.
 - **i18n cookie name is `bf_locale`** and is set by `/api/practitioner-settings/locale` with `path=/, sameSite=lax, maxAge=1y`. SSR reads cookie first via `getLocale()`, falls back to `practitioners.locale` DB lookup, then to `DEFAULT_LOCALE='el'`. Never read the cookie directly in components — always go through `getLocale()` / `getT()` (server) or `useT()` (client).
