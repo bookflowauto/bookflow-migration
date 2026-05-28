@@ -122,7 +122,7 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
               </div>
             </div>
           </div>
-          <div className="flex sm:flex-col items-center sm:items-end gap-2 sm:gap-0 shrink-0 w-full sm:w-auto">
+          <div className="flex sm:flex-col items-center sm:items-end gap-2 sm:gap-0 shrink-0 w-full sm:w-auto pl-[72px] sm:pl-0">
             <p className="text-xs sm:order-2 sm:mt-2" style={{ color: 'var(--text-subtle)' }}>{t('patient.intakeStatus')}</p>
             <IntakeBadge
               value={patient.intake_status}
