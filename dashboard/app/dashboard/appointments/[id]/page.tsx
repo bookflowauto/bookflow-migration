@@ -128,7 +128,7 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
             {apt.raw_transcript ? (
               <TranscriptEditor appointmentId={apt.appointment_id} initialTranscript={apt.raw_transcript} />
             ) : (
-              <div className="py-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+              <div className="py-4 text-sm" style={{ color: 'var(--text-muted)' }}>
                 {apt.scribe_status === 'transcribing'
                   ? t('appointment.transcribing')
                   : t('appointment.noTranscript')}
