@@ -85,65 +85,24 @@
     },
     {
       "id": "node-006",
-      "name": "Get Patient by Phone",
+      "name": "Upsert Patient",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
       "position": [1180, 300],
-      "alwaysOutputData": true,
-      "parameters": {
-        "method": "GET",
-        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?phone=eq.{{ encodeURIComponent($json.patient_phone) }}&select=id%2Cname%2Cpatient_ref%2Cphone&limit=1",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "options": {}
-      },
-      "credentials": {
-        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
-      }
-    },
-    {
-      "id": "node-007",
-      "name": "Patient Found?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [1400, 300],
-      "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
-          "conditions": [
-            {
-              "id": "cond-002",
-              "leftValue": "={{ $json.id }}",
-              "rightValue": "",
-              "operator": { "type": "string", "operation": "notEmpty" }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      }
-    },
-    {
-      "id": "node-008",
-      "name": "Create Patient",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [1620, 420],
-      "continueOnFail": true,
       "parameters": {
         "method": "POST",
-        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients",
+        "url": "https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?on_conflict=phone",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "supabaseApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Prefer", "value": "return=representation" }
+            { "name": "Prefer", "value": "resolution=ignore-duplicates,return=minimal" }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ name: $('Parse Event').item.json.patient_name, phone: $('Parse Event').item.json.patient_phone, intake_status: 'pending' }) }}",
+        "jsonBody": "={{ JSON.stringify({ name: $json.patient_name, phone: $json.patient_phone, intake_status: 'pending' }) }}",
         "options": {}
       },
       "credentials": {
@@ -152,13 +111,30 @@
     },
     {
       "id": "node-008b",
+      "name": "Get Patient ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1400, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dgnkvrjwfbdsdcuxsruk.supabase.co/rest/v1/patients?phone=eq.{{ encodeURIComponent($('Parse Event').item.json.patient_phone) }}&select=id&limit=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {}
+      },
+      "credentials": {
+        "supabaseApi": { "id": "", "name": "Supabase Bookflow" }
+      }
+    },
+    {
+      "id": "node-008c",
       "name": "Resolve Patient ID",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1780, 350],
+      "position": [1600, 300],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Merge both paths: either patient was found (Get Patient by Phone) or created (Create Patient)\n// Extract the patient ID from whichever succeeded.\n// Safe handling: Create Patient may not have executed if patient was found.\n\ntry {\n  const foundPatient = $('Get Patient by Phone').item.json;\n  if (foundPatient?.id) {\n    return { json: { patient_id: foundPatient.id } };\n  }\n} catch (e) {\n  // Get Patient by Phone not available\n}\n\ntry {\n  const createdPatient = $('Create Patient').item.json;\n  if (createdPatient?.id) {\n    return { json: { patient_id: createdPatient.id } };\n  }\n} catch (e) {\n  // Create Patient not executed (patient was found instead)\n}\n\n// If both failed, log warning but allow flow to continue\nconsole.warn('[Practitioner Sync] Could not resolve patient ID for event:', $('Parse Event').item.json.google_event_id);\nreturn { json: { patient_id: null, warning: 'No patient found or created' } };"
+        "jsCode": "// After upsert+select, $json is { id: '<uuid>' } from the SELECT.\n// Normalise to { patient_id } so downstream nodes work unchanged.\nconst patientId = $input.item.json.id || null;\nif (!patientId) {\n  console.warn('[Practitioner Sync] No patient row found after upsert for event:', $('Parse Event').item.json.google_event_id, 'phone:', $('Parse Event').item.json.patient_phone);\n}\nreturn { json: { patient_id: patientId } };"
       }
     },
     {
@@ -297,8 +273,8 @@
           "conditions": [
             {
               "leftValue": "={{ $json.quota_exceeded }}",
-              "rightValue": true,
-              "operator": { "type": "boolean", "operation": "notEqual" }
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
             }
           ],
           "combinator": "and"
@@ -399,18 +375,12 @@
       "main": [[{ "node": "Parse Event", "type": "main", "index": 0 }]]
     },
     "Parse Event": {
-      "main": [[{ "node": "Get Patient by Phone", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Upsert Patient", "type": "main", "index": 0 }]]
     },
-    "Get Patient by Phone": {
-      "main": [[{ "node": "Patient Found?", "type": "main", "index": 0 }]]
+    "Upsert Patient": {
+      "main": [[{ "node": "Get Patient ID", "type": "main", "index": 0 }]]
     },
-    "Patient Found?": {
-      "main": [
-        [{ "node": "Resolve Patient ID", "type": "main", "index": 0 }],
-        [{ "node": "Create Patient", "type": "main", "index": 0 }]
-      ]
-    },
-    "Create Patient": {
+    "Get Patient ID": {
       "main": [[{ "node": "Resolve Patient ID", "type": "main", "index": 0 }]]
     },
     "Resolve Patient ID": {

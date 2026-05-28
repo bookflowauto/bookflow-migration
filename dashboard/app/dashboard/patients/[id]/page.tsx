@@ -19,14 +19,9 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
 
   const { data: appointments } = await supabase
     .from('appointments')
-    .select('id, appointment_time, summary, status, scribe_status, raw_transcript, mydata_status, mydata_amount_eur')
+    .select('id, appointment_time, summary, status, scribe_status, raw_transcript')
     .eq('patient_id', id)
     .order('appointment_time', { ascending: false })
-
-  const totalBilledEur =
-    appointments
-      ?.filter(a => a.mydata_status === 'submitted')
-      .reduce((sum, a) => sum + Number(a.mydata_amount_eur ?? 0), 0) ?? 0
 
   const age = patient.date_of_birth
     ? Math.floor((Date.now() - new Date(patient.date_of_birth).getTime()) / (365.25 * 24 * 3600 * 1000))
@@ -35,6 +30,29 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
   const dobFormatted = patient.date_of_birth
     ? new Date(patient.date_of_birth).toLocaleDateString(bcp, { day: 'numeric', month: 'short', year: 'numeric' })
     : null
+
+  // Strip Greek country code prefix for display, but keep it in tel: link
+  const phoneDisplay =
+    patient.phone && /^30\d{10}$/.test(patient.phone)
+      ? patient.phone.slice(2)
+      : patient.phone
+  const phoneHref = patient.phone
+    ? (patient.phone.startsWith('+') ? patient.phone : `+${patient.phone}`)
+    : null
+
+  // Deterministic per-patient avatar color so each patient is visually distinguishable
+  const AVATAR_PALETTE = [
+    { bg: 'rgba(45, 212, 192, 0.15)', fg: '#2DD4C0' },   // teal
+    { bg: 'rgba(96, 165, 250, 0.15)', fg: '#60A5FA' },   // blue
+    { bg: 'rgba(167, 139, 250, 0.18)', fg: '#A78BFA' },  // violet
+    { bg: 'rgba(244, 114, 182, 0.18)', fg: '#F472B6' },  // pink
+    { bg: 'rgba(251, 146, 60, 0.18)', fg: '#FB923C' },   // orange
+    { bg: 'rgba(52, 211, 153, 0.18)', fg: '#34D399' },   // emerald
+    { bg: 'rgba(250, 204, 21, 0.20)', fg: '#FACC15' },   // amber
+  ]
+  let avatarHash = 0
+  for (let i = 0; i < patient.id.length; i++) avatarHash = (avatarHash * 31 + patient.id.charCodeAt(i)) >>> 0
+  const avatarColor = AVATAR_PALETTE[avatarHash % AVATAR_PALETTE.length]
 
   const latestTranscribedAppointmentId =
     appointments?.find(a => a.raw_transcript && a.raw_transcript.trim().length > 0)?.id ?? null
@@ -63,36 +81,44 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
           <div className="flex items-center gap-4 min-w-0">
             <div
               className="w-14 h-14 rounded-full flex items-center justify-center text-xl font-semibold shrink-0"
-              style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+              style={{ background: avatarColor.bg, color: avatarColor.fg }}
             >
               {patient.name.charAt(0).toUpperCase()}
             </div>
             <div className="min-w-0">
               <h1 className="text-xl font-semibold tracking-tight" style={{ color: 'var(--text)' }}>{patient.name}</h1>
               <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--text-subtle)' }}>{patient.patient_ref}</p>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mt-2 text-sm">
                 {patient.email && (
-                  <a href={`mailto:${patient.email}`} className="inline-flex items-center gap-1.5 hover:underline" style={{ color: 'inherit' }}>
+                  <a
+                    href={`mailto:${patient.email}`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-colors"
+                    style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+                  >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" />
                     </svg>
                     {patient.email}
                   </a>
                 )}
-                {patient.phone && (
-                  <a href={`tel:${patient.phone}`} className="inline-flex items-center gap-1.5 hover:underline" style={{ color: 'inherit' }}>
+                {phoneHref && (
+                  <a
+                    href={`tel:${phoneHref}`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-colors"
+                    style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+                  >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
                     </svg>
-                    {patient.phone}
+                    {phoneDisplay}
                   </a>
                 )}
                 {dobFormatted && (
-                  <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-1" style={{ color: 'var(--text-muted)' }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
                     </svg>
-                    {dobFormatted}{age !== null ? ` · ${age}` : ''}
+                    {dobFormatted}{age !== null ? ` (${age})` : ''}
                   </span>
                 )}
               </div>
@@ -110,14 +136,10 @@ export default async function PatientPage({ params }: { params: Promise<{ id: st
       </div>
 
       {/* Mini stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-6">
         <MiniStat label={t('patient.stats.sessions')} value={patient.total_sessions ?? 0} />
         <MiniStat label={t('patient.stats.upcoming')} value={upcoming} />
         <MiniStat label={t('patient.stats.completed')} value={completed} />
-        <MiniStat
-          label={t('patient.stats.billed')}
-          value={totalBilledEur.toLocaleString(bcp, { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })}
-        />
       </div>
 
       {/* Clinical summary */}

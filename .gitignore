@@ -35,3 +35,7 @@ desktop.ini
 # Logs
 *.log
 npm-debug.log*
+
+# Large local backups
+n8n-backup.sql
+*.sql.bak
