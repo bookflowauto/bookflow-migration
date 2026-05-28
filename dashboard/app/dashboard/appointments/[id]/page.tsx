@@ -22,6 +22,23 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
 
   if (!apt) notFound()
 
+  const { data: patientExtra } = await supabase
+    .from('patients')
+    .select('email, date_of_birth')
+    .eq('id', apt.patient_id)
+    .single()
+
+  const patientAge = patientExtra?.date_of_birth
+    ? Math.floor((Date.now() - new Date(patientExtra.date_of_birth).getTime()) / (365.25 * 24 * 3600 * 1000))
+    : null
+  const patientDobFormatted = patientExtra?.date_of_birth
+    ? new Date(patientExtra.date_of_birth).toLocaleDateString(bcp, { day: 'numeric', month: 'short', year: 'numeric' })
+    : null
+  const patientPhoneDisplay =
+    apt.patient_phone && /^30\d{10}$/.test(apt.patient_phone)
+      ? apt.patient_phone.slice(2)
+      : apt.patient_phone
+
   // Auto-recover stuck 'pending': if Workflow #5 never responded within 5 min,
   // flip to 'failed' so the practitioner sees the retry button.
   if (
@@ -168,7 +185,12 @@ export default async function AppointmentPage({ params }: { params: Promise<{ id
             </div>
 
             <dl className="space-y-3 text-sm">
-              <Row label={t('appointment.phoneLabel')} value={apt.patient_phone} />
+              <Row label={t('appointment.phoneLabel')} value={patientPhoneDisplay} />
+              <Row label="Email" value={patientExtra?.email} />
+              <Row
+                label="DOB"
+                value={patientDobFormatted ? `${patientDobFormatted}${patientAge !== null ? ` (${patientAge})` : ''}` : null}
+              />
               <Row label={t('appointment.intakeLabel')} value={apt.intake_status} />
             </dl>
           </div>
